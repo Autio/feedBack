@@ -20,6 +20,25 @@ test('diagnostics schema redacts raw payloads, paths, command lines, and provide
     assert.doesNotMatch(json, /Secret Artist|Secret Song|secret\.wav|abc123|rawPayload|commandLine|never export|ffmpeg -i/);
 });
 
+test('caller-supplied refs and fingerprints are exported as safe correlation keys', async () => {
+    const window = loadJobs();
+    const { provider } = makeProvider();
+    await dispatch(window, 'register-provider', { provider });
+    const enqueued = await dispatch(window, 'enqueue', enqueuePayload({
+        target: { targetRef: 'Secret Song_p.psarc', id: 'Private Library Entry' },
+        inputs: { fingerprint: 'Secret Input Cache.psarc' },
+        logicalJobKey: 'Secret Song_p.psarc',
+    }));
+    const bridge = await dispatch(window, 'record-bridge-hit', { logicalJobKey: 'Secret Song_p.psarc', safeReason: 'legacy path observed' });
+    const snapshot = diagnosticsSnapshot(window);
+    const job = snapshot.jobs.active[0];
+
+    assert.equal(bridge.payload.bridge.jobId, enqueued.payload.job.jobId);
+    assert.equal(job.targetRef.startsWith('target-'), true);
+    assert.equal(job.inputFingerprint.startsWith('input-'), true);
+    assert.doesNotMatch(JSON.stringify(snapshot), /Secret Song|Secret Input|Private Library|\.psarc/);
+});
+
 test('recoverable job references are the only active state persisted across reloads', async () => {
     const window = loadJobs();
     const { provider } = makeProvider({ providerId: 'provider.recover', recoverySupport: { queued: true, running: true, paused: false } });

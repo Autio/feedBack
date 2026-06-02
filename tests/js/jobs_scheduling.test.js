@@ -35,6 +35,23 @@ test('provider capacity starts one job and keeps the rest queued in priority ord
     assert.equal(snapshot.jobs.active[0].safeLabel, 'Third');
 });
 
+test('provider queue capacity rejects excess queued work before creating a job', async () => {
+    const window = loadJobs();
+    const { provider } = makeProvider({ capacity: { maxRunning: 1, maxQueued: 1 } });
+    await dispatch(window, 'register-provider', { provider });
+
+    const running = await dispatch(window, 'enqueue', enqueuePayload({ logicalJobKey: 'capacity-running' }));
+    const queued = await dispatch(window, 'enqueue', enqueuePayload({ logicalJobKey: 'capacity-queued' }));
+    const rejected = await dispatch(window, 'enqueue', enqueuePayload({ logicalJobKey: 'capacity-rejected' }));
+    const snapshot = diagnosticsSnapshot(window);
+
+    assert.equal(running.status, 'applied');
+    assert.equal(queued.status, 'queued');
+    assert.equal(rejected.status, 'unavailable');
+    assert.equal(snapshot.jobs.active.length, 1);
+    assert.equal(snapshot.jobs.queued.length, 1);
+});
+
 test('progress, completion, and terminal retention are reflected in events and diagnostics', async () => {
     const window = loadJobs();
     const events = captureEvents(window);
@@ -52,6 +69,63 @@ test('progress, completion, and terminal retention are reflected in events and d
     assert.ok(snapshot.jobs.recentTerminal[0].history.some(entry => entry.kind === 'progress'));
     assert.ok(events.some(event => event.event === 'progress'));
     assert.ok(events.some(event => event.event === 'completed'));
+});
+
+test('provider enqueue exceptions fail safely without leaking private details', async () => {
+    const window = loadJobs();
+    const { provider } = makeProvider({
+        operationHandlers: {
+            'job.enqueue': () => { throw new Error('failed near /Users/example/private/song.psarc token=abc123'); },
+        },
+    });
+    await dispatch(window, 'register-provider', { provider });
+
+    const result = await dispatch(window, 'enqueue', enqueuePayload({ logicalJobKey: 'throws-on-start' }));
+    const snapshot = diagnosticsSnapshot(window);
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.outcome, 'failed');
+    assert.equal(snapshot.jobs.active.length, 0);
+    assert.equal(snapshot.jobs.recentTerminal[0].terminalOutcome.category, 'provider-failure');
+    assert.doesNotMatch(JSON.stringify(snapshot), /Users\/example|song\.psarc|abc123/);
+});
+
+test('provider enqueue failed results become terminal failures', async () => {
+    const window = loadJobs();
+    const { provider } = makeProvider({
+        operationHandlers: {
+            'job.enqueue': () => ({ outcome: 'failed', category: 'external-dependency', safeReason: 'tool failed near /Users/example/private/cache.bin' }),
+        },
+    });
+    await dispatch(window, 'register-provider', { provider });
+
+    const result = await dispatch(window, 'enqueue', enqueuePayload({ logicalJobKey: 'failed-result' }));
+    const snapshot = diagnosticsSnapshot(window);
+
+    assert.equal(result.status, 'error');
+    assert.equal(result.outcome, 'failed');
+    assert.equal(snapshot.jobs.recentTerminal[0].terminalOutcome.category, 'external-dependency');
+    assert.doesNotMatch(JSON.stringify(snapshot), /Users\/example|cache\.bin/);
+});
+
+test('async provider enqueue rejections become terminal provider failures', async () => {
+    const window = loadJobs();
+    const { provider } = makeProvider({
+        operationHandlers: {
+            'job.enqueue': () => Promise.reject(new Error('secret path /Users/example/private/cache.bin')),
+        },
+    });
+    await dispatch(window, 'register-provider', { provider });
+
+    const result = await dispatch(window, 'enqueue', enqueuePayload({ logicalJobKey: 'rejects-after-start' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    const snapshot = diagnosticsSnapshot(window);
+
+    assert.equal(result.status, 'applied');
+    assert.equal(snapshot.jobs.active.length, 0);
+    assert.equal(snapshot.jobs.recentTerminal[0].terminalOutcome.category, 'provider-failure');
+    assert.doesNotMatch(JSON.stringify(snapshot), /Users\/example|cache\.bin/);
 });
 
 test('cancel, pause, resume, retry, and stale transitions use canonical outcomes', async () => {

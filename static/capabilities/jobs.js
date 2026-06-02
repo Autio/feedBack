@@ -124,6 +124,13 @@
         return _string(value, fallback).replace(/[^A-Za-z0-9_.:-]+/g, '-').slice(0, 96) || fallback;
     }
 
+    function _safeCorrelationKey(value, prefix) {
+        const normalized = _string(value, '');
+        if (!normalized) return '';
+        if (new RegExp(`^${prefix}-[A-Za-z0-9_.:-]+$`).test(normalized)) return normalized.slice(0, 96);
+        return `${prefix}-${_hash(normalized)}`;
+    }
+
     function _safeValue(value, depth = 0) {
         if (typeof value === 'string') return _safeText(value);
         if (value == null || typeof value === 'number' || typeof value === 'boolean') return value;
@@ -249,14 +256,16 @@
 
     function _targetRef(target) {
         const source = _plainObject(target);
-        const seed = source.targetRef || source.safeRef || source.safeFingerprint || source.id || source.kind || source.name || 'unknown';
-        if (source.targetRef && /^[A-Za-z0-9_.:-]+$/.test(String(source.targetRef))) return String(source.targetRef).slice(0, 96);
+        if (source.safeRef || source.safeTargetRef || source.safeFingerprint) return _safeId(source.safeRef || source.safeTargetRef || source.safeFingerprint, 'target-unknown');
+        if (source.targetRef && /^target-[A-Za-z0-9_.:-]+$/.test(String(source.targetRef))) return String(source.targetRef).slice(0, 96);
+        const seed = JSON.stringify(_safeValue(source)) || source.kind || 'unknown';
         return `target-${_hash(seed)}`;
     }
 
     function _inputFingerprint(inputs) {
         const source = _plainObject(inputs);
-        return _safeId(source.safeFingerprint || source.fingerprint || _hash(JSON.stringify(_safeValue(source))), 'input-unknown');
+        if (source.safeFingerprint) return _safeId(source.safeFingerprint, 'input-unknown');
+        return `input-${_hash(JSON.stringify(_safeValue(source)))}`;
     }
 
     function _approvalScope(args, providerId) {
@@ -315,7 +324,7 @@
         const scope = _approvalScope(args, providerId);
         const job = {
             jobId: _safeId(args.jobId, '') || _id('job'),
-            logicalJobKey: _safeId(args.logicalJobKey || '', ''),
+            logicalJobKey: _safeCorrelationKey(args.logicalJobKey || '', 'logical'),
             jobType: _safeId(args.jobType, 'unknown'),
             providerId,
             requesterId: scope.requesterId,
@@ -441,7 +450,51 @@
         const handlers = provider && provider.operationHandlers ? provider.operationHandlers : {};
         const handler = handlers[operation] || handlers[operation.replace(/^job\./, '')];
         if (typeof handler !== 'function') return null;
-        return handler(_safeValue(payload));
+        try {
+            return handler(_safeValue(payload));
+        } catch (err) {
+            return _providerException(operation, err);
+        }
+    }
+
+    function _providerException(operation, err) {
+        return {
+            outcome: 'failed',
+            __providerException: true,
+            safeReason: _safeText(err && err.message ? err.message : String(err || 'Provider callback failed'), `Provider ${operation} callback failed`),
+        };
+    }
+
+    function _isPromiseLike(value) {
+        return value && typeof value.then === 'function';
+    }
+
+    function _providerCallFailed(result) {
+        if (!result || typeof result !== 'object') return false;
+        return !!result.__providerException || ['failed', 'timeout', 'unavailable', 'validation-failed'].includes(result.outcome) || ['failed', 'timeout'].includes(result.status);
+    }
+
+    function _terminalProviderFailure(job, operation, result) {
+        const reason = result && (result.safeReason || result.reason) ? (result.safeReason || result.reason) : `Provider ${operation} callback failed`;
+        const outcomeStatus = result && (result.outcome === 'timeout' || result.status === 'timeout') ? 'timeout' : 'failed';
+        const category = result && FAILURE_CATEGORIES.has(result.category) ? result.category : (result && result.outcome === 'validation-failed' ? 'invalid-input' : (result && result.outcome === 'unavailable' ? 'provider-unavailable' : 'provider-failure'));
+        _terminal(job, outcomeStatus, category, reason, true, result && result.__providerException ? 'Provider callback failed' : 'Provider reported failure');
+        _rememberOutcome(operation, outcomeStatus, { jobId: job.jobId, providerId: job.providerId, requesterId: job.requesterId, category, safeReason: reason });
+        _emitJobs('failed', { job: _jobSummary(job, { includeHistory: false }) });
+        _scheduleProvider(job.providerId);
+        return _result(outcomeStatus, { job: _jobSummary(job) }, reason);
+    }
+
+    function _watchProviderPromise(result, job, operation, onResolve) {
+        if (!_isPromiseLike(result)) return result;
+        result.then(value => {
+            if (_providerCallFailed(value)) {
+                _terminalProviderFailure(job, operation, value);
+                return;
+            }
+            if (typeof onResolve === 'function') onResolve(value);
+        }).catch(err => _terminalProviderFailure(job, operation, _providerException(operation, err)));
+        return { outcome: 'handled' };
     }
 
     function _compatibleProviders(jobType) {
@@ -489,7 +542,7 @@
     }
 
     function _findDuplicateJob(args, providerId) {
-        const logicalJobKey = _safeId(args.logicalJobKey || '', '');
+        const logicalJobKey = _safeCorrelationKey(args.logicalJobKey || '', 'logical');
         if (!logicalJobKey) return null;
         for (const job of jobs.values()) {
             if (job.logicalJobKey === logicalJobKey && job.providerId === providerId && !TERMINAL_STATES.has(job.state)) return job;
@@ -597,6 +650,14 @@
             }
             let nextState = recoverState;
             const recoveryResult = _callProvider(provider, 'job.recover', { ref });
+            if (_providerCallFailed(recoveryResult)) {
+                const job = _jobFromRecoveryRef(ref, STATES.PROVIDER_UNAVAILABLE);
+                jobs.set(job.jobId, job);
+                _terminal(job, 'provider-unavailable', 'provider-unavailable', recoveryResult.safeReason || 'Provider recovery callback failed', false);
+                _emitJobs('provider-unavailable', { job: _jobSummary(job, { includeHistory: false }) });
+                pendingRecoverableRefs.delete(jobId);
+                continue;
+            }
             if (recoveryResult && recoveryResult.state && [STATES.QUEUED, STATES.RUNNING, STATES.PAUSED].includes(recoveryResult.state)) nextState = recoveryResult.state;
             const job = _jobFromRecoveryRef(ref, nextState);
             jobs.set(job.jobId, job);
@@ -661,13 +722,21 @@
             _rememberOutcome('enqueue', 'handled', { jobId: duplicate.jobId, providerId: provider.providerId, requesterId: duplicate.requesterId, safeReason: 'Duplicate logical job suppressed' });
             return _handled({ job: _jobSummary(duplicate, { includeHistory: false }), duplicate: true });
         }
+        const load = _providerLoad(provider.providerId);
+        if (load.running >= provider.capacity.maxRunning && load.queued >= provider.capacity.maxQueued) {
+            _rememberOutcome('enqueue', 'unavailable', { providerId: provider.providerId, requesterId: _safeId(args.requester || ctx.requester, 'unknown'), safeReason: 'Provider queue capacity reached' });
+            return _result('unavailable', {}, 'Provider queue capacity reached');
+        }
         const job = _newJob(args, provider.providerId);
         jobs.set(job.jobId, job);
         _history(job, 'event', 'Job queued');
         _rememberOutcome('enqueue', 'queued', { jobId: job.jobId, providerId: provider.providerId, requesterId: job.requesterId });
         _emitJobs('queued', { job: _jobSummary(job, { includeHistory: false }) });
         _scheduleProvider(provider.providerId);
-        return _result(job.state === STATES.RUNNING ? 'handled' : 'queued', { job: _jobSummary(job) });
+        if (job.state === STATES.RUNNING) return _handled({ job: _jobSummary(job) });
+        if (job.state === STATES.QUEUED) return _result('queued', { job: _jobSummary(job) });
+        if (TERMINAL_STATES.has(job.state)) return _result(job.terminalOutcome && job.terminalOutcome.status || job.state, { job: _jobSummary(job) }, job.safeReason || 'Job reached a terminal state');
+        return _result(job.state, { job: _jobSummary(job) });
     }
 
     function _listCommand(ctx) {
@@ -715,7 +784,9 @@
         job.state = STATES.CANCELLATION_REQUESTED;
         job.updatedAt = _now();
         _history(job, 'event', 'Cancellation requested');
-        _callProvider(check.provider, 'job.cancel', { job: _jobSummary(job, { includeHistory: false }), requester: ctx.payload && ctx.payload.requester });
+        const result = _callProvider(check.provider, 'job.cancel', { job: _jobSummary(job, { includeHistory: false }), requester: ctx.payload && ctx.payload.requester });
+        if (_providerCallFailed(result)) return _terminalProviderFailure(job, 'cancel', result);
+        _watchProviderPromise(result, job, 'cancel');
         _rememberOutcome('cancel', 'handled', { jobId: job.jobId, providerId: job.providerId, requesterId: job.requesterId, safeReason: 'Cancellation requested' });
         _emitJobs('cancellation-requested', { job: _jobSummary(job, { includeHistory: false }) });
         return _handled({ job: _jobSummary(job) });
@@ -731,7 +802,9 @@
         job.state = STATES.PAUSED;
         job.updatedAt = _now();
         _history(job, 'event', 'Job paused');
-        _callProvider(check.provider, 'job.pause', { job: _jobSummary(job, { includeHistory: false }) });
+        const result = _callProvider(check.provider, 'job.pause', { job: _jobSummary(job, { includeHistory: false }) });
+        if (_providerCallFailed(result)) return _terminalProviderFailure(job, 'pause', result);
+        _watchProviderPromise(result, job, 'pause');
         _rememberOutcome('pause', 'handled', { jobId: job.jobId, providerId: job.providerId, requesterId: job.requesterId });
         _emitJobs('paused', { job: _jobSummary(job, { includeHistory: false }) });
         return _handled({ job: _jobSummary(job) });
@@ -748,7 +821,9 @@
         job.queuedAt = _now();
         job.updatedAt = _now();
         _history(job, 'event', 'Job resumed');
-        _callProvider(check.provider, 'job.resume', { job: _jobSummary(job, { includeHistory: false }) });
+        const result = _callProvider(check.provider, 'job.resume', { job: _jobSummary(job, { includeHistory: false }) });
+        if (_providerCallFailed(result)) return _terminalProviderFailure(job, 'resume', result);
+        _watchProviderPromise(result, job, 'resume');
         _rememberOutcome('resume', 'queued', { jobId: job.jobId, providerId: job.providerId, requesterId: job.requesterId });
         _emitJobs('resumed', { job: _jobSummary(job, { includeHistory: false }) });
         _scheduleProvider(job.providerId);
@@ -779,7 +854,9 @@
         job.updatedAt = _now();
         job.attempts.push(_newAttempt(job, STATES.QUEUED));
         _history(job, 'event', 'Retry attempt queued');
-        _callProvider(provider, 'job.retry', { job: _jobSummary(job, { includeHistory: false }) });
+        const result = _callProvider(provider, 'job.retry', { job: _jobSummary(job, { includeHistory: false }) });
+        if (_providerCallFailed(result)) return _terminalProviderFailure(job, 'retry', result);
+        _watchProviderPromise(result, job, 'retry');
         _rememberOutcome('retry', 'retry-started', { jobId: job.jobId, providerId: job.providerId, requesterId: job.requesterId });
         _emitJobs('retried', { job: _jobSummary(job, { includeHistory: false }) });
         _scheduleProvider(job.providerId);
@@ -795,8 +872,8 @@
             operation: _safeText(source.operation || 'unknown', 'unknown', 80),
             jobId: source.jobId && jobs.has(source.jobId) ? source.jobId : null,
             providerId: source.providerId && providers.has(source.providerId) ? source.providerId : null,
-            logicalJobKey: _safeId(source.logicalJobKey || '', ''),
-            diagnosticsOnly: false,
+            logicalJobKey: _safeCorrelationKey(source.logicalJobKey || '', 'logical'),
+            diagnosticsOnly: true,
             timestamp: _now(),
             safeReason: _safeText(source.safeReason || source.reason || 'legacy surface observed'),
         };
@@ -805,7 +882,6 @@
                 if (job.logicalJobKey === bridge.logicalJobKey) {
                     bridge.jobId = job.jobId;
                     bridge.providerId = job.providerId;
-                    bridge.diagnosticsOnly = true;
                     break;
                 }
             }
@@ -862,7 +938,14 @@
         }
         _history(job, 'event', 'Job started');
         const result = _callProvider(provider, 'job.enqueue', { job: _jobSummary(job, { includeHistory: false }) });
-        if (result && result.progress) updateProgress(provider.providerId, job.jobId, result.progress);
+        if (_providerCallFailed(result)) {
+            _terminalProviderFailure(job, 'enqueue', result);
+            return;
+        }
+        _watchProviderPromise(result, job, 'enqueue', value => {
+            if (job.state === STATES.RUNNING && value && value.progress) updateProgress(provider.providerId, job.jobId, value.progress);
+        });
+        if (!_isPromiseLike(result) && result && result.progress) updateProgress(provider.providerId, job.jobId, result.progress);
         _emitJobs('started', { job: _jobSummary(job, { includeHistory: false }) });
     }
 
