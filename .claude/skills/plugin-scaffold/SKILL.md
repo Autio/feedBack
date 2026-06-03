@@ -1,6 +1,6 @@
 ---
 name: plugin-scaffold
-description: Scaffold a new Slopsmith plugin skeleton. USE WHEN the user asks to create a new plugin, scaffold a plugin, bootstrap a plugin, new visualization plugin, new overlay plugin, new settings-only plugin, plugin starter, plugin skeleton. Args needed - plugin slug (snake_case) and type (visualization / overlay / settings-only / routes-only). Generates plugins/<id>/ with plugin.json, screen.js, and optional routes.py / settings.html / Playwright test stub matching the requested type.
+description: Scaffold a new capability-aware Slopsmith plugin skeleton. USE WHEN the user asks to create a new plugin, scaffold a plugin, bootstrap a plugin, new visualization plugin, new overlay plugin, new settings-only plugin, plugin starter, plugin skeleton. Args needed - plugin slug (snake_case) and type (visualization / overlay / settings-only / routes-only). Generates plugins/<id>/ with plugin.json, capability-pipelines metadata, screen.js, and optional routes.py / settings.html / Playwright test stub matching the requested type.
 ---
 
 # plugin-scaffold
@@ -34,15 +34,15 @@ If the plugin slug or type is missing, ask once.
 
 **`type=visualization`** — adds:
 - `"type": "visualization"` and `"script": "screen.js"` to manifest
-- `"capabilities": { "visualization": { "roles": ["provider"], "operations": ["renderer.create", "renderer.destroy", "renderer.inspect"], "mode": "active", "compatibility": "shim-allowed", "ownership": "multi-provider", "safety": "safe", "version": 1 } }`
+- `"capabilities": { "visualization": { "roles": ["provider"], "operations": ["renderer.create", "renderer.destroy", "renderer.inspect"], "mode": "active", "compatibility": "none", "ownership": "multi-provider", "safety": "safe", "version": 1 } }`
 - `screen.js` exporting `window.slopsmithViz_<id> = function () { return { contextType: '2d', init(canvas, bundle) { this.ctx = canvas.getContext('2d'); }, draw(bundle) { /* TODO */ }, destroy() {} }; };` plus a static `matchesArrangement` example commented out
 - `tests/browser/<id>.spec.ts` — Playwright stub that loads the app and asserts the plugin's factory is registered
 
 **`type=overlay`** — adds:
 - `"script": "screen.js"` to manifest (no `type` declared — overlays don't use the picker)
-- `"capabilities": { "ui.player-overlays": { "roles": ["provider"], "mode": "active", "compatibility": "shim-allowed", "ownership": "multi-provider", "safety": "safe", "version": 1 } }`
+- `"capabilities": { "ui.player-overlays": { "roles": ["provider"], "mode": "active", "compatibility": "none", "ownership": "multi-provider", "safety": "safe", "version": 1 } }`
 - a matching `"ui"` contribution with a stable overlay id and redaction-safe label
-- `screen.js` scaffolding a navbar toggle, an own-canvas + own-rAF loop reading `highway.getNotes()` / `getChords()` / `getTime()`, and respecting `highway.isDefaultRenderer()` if using `highway.project` / `fretX`
+- `screen.js` scaffolding an own-canvas + own-rAF loop for the declared overlay contribution, and respecting renderer ownership if it uses highway geometry helpers
 - `tests/browser/<id>.spec.ts` — toggle on / off test
 
 **`type=settings-only`** — adds:

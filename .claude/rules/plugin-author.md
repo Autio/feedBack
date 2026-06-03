@@ -12,7 +12,7 @@ These rules apply only when editing files under `plugins/**`. They encode the co
 ## Manifest
 
 - **`plugin.json` is required** and must validate against [`schema/plugin.schema.json`](../../schema/plugin.schema.json). Required fields: `id`, `name`. The `id` must match the parent directory name (the loader keys discovery by directory; drift breaks plugin lookup).
-- **Capability-aware plugins declare intent** with `standards: ["capability-pipelines.v1"]` and redaction-safe `capabilities` / `ui` metadata. Legacy fields still work, but don't strip or reject native metadata when editing manifests.
+- **Capability-aware plugins declare intent** with `standards: ["capability-pipelines.v1"]` and redaction-safe `capabilities` / `ui` metadata. Treat these declarations as the plugin's primary contract with Slopsmith.
 - **License must come from the curated allowlist** if the plugin is intended for the curated list. See [`CONTRIBUTING.md`](../../CONTRIBUTING.md) "Plugin licensing".
 - **`type: "visualization"`** requires a `script` field exporting `window.slopsmithViz_<id>`. See [`docs/plugin-visualization-contracts.md`](../../docs/plugin-visualization-contracts.md).
 
@@ -25,10 +25,7 @@ These rules apply only when editing files under `plugins/**`. They encode the co
 ## Frontend (`screen.js`)
 
 - **Wrap in an IIFE** — `(function () { 'use strict'; ... })();`. Frontend scripts share global scope; leaking variables collides with other plugins.
-- **Hook `window.playSong` carefully** — always call the original, always `await` it. Wrappers run outermost-first; awaiting yields to the event loop and WebSocket messages can arrive before the outer wrapper finishes setup. Use `highway.getSongInfo()` as a fallback rather than relying solely on `_onReady`.
-- **Hook `window.showScreen`** — clean up your plugin's state when the user leaves the player screen.
-- **Use `window.slopsmith.emit` / `on`** for cross-plugin communication. Don't poll other plugins' globals.
-- **Register shortcuts with `window.registerShortcut({ key, scope, handler })`** and clean up with `window.unregisterShortcut(key, scope)` — pass the same scope you registered with (default `'global'` won't match `'player'` / `'plugin-*'`). For panel-scoped registries, prefer `panel.clearShortcuts()`. See [`docs/plugin-keyboard-shortcuts.md`](../../docs/plugin-keyboard-shortcuts.md).
+- **Prefer capability commands, events, and provider APIs** for app coordination. Don't add new private global wrappers or cross-plugin polling; if the needed domain is missing, call that out as a capability gap.
 
 ## State and config
 

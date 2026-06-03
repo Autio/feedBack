@@ -1,6 +1,6 @@
 ---
 name: slopsmith-reviewer
-description: Plugin-aware code reviewer for Slopsmith. USE WHEN reviewing plugin changes, auditing a plugin against the manifest contract, checking that a plugin uses load_sibling / context["log"] / scoped shortcuts correctly, or verifying that a `plugin.json` matches the schema and the directory it lives in. Returns a structured pass/fail report with specific file:line citations.
+description: Plugin-aware code reviewer for Slopsmith. USE WHEN reviewing plugin changes, auditing a plugin against the manifest contract, checking that a plugin uses capability metadata / load_sibling / context["log"] correctly, or verifying that a `plugin.json` matches the schema and the directory it lives in. Returns a structured pass/fail report with specific file:line citations.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 ---
@@ -39,10 +39,9 @@ Run each item; structure the output as `PASS` / `FAIL` / `N/A` with file:line ci
 6. **Backend logging.** Grep `plugins/<id>/*.py` for `print(`, `traceback.print_exc(`, `logging.getLogger(`. Suggest `context["log"]` replacements.
 7. **Sibling imports.** If `routes.py` exists and grep finds bare `from <module> import` for any sibling Python file in the plugin dir, flag and recommend `context["load_sibling"]`.
 8. **Frontend IIFE.** If `script` exists, check the top of the file isn't running top-level statements that leak to global scope. Wrapping in `(function () { 'use strict'; ... })();` is the convention.
-9. **`playSong` wrapper discipline.** If the script reassigns `window.playSong`, confirm it calls the original and `await`s it.
-10. **Shortcut scope discipline.** If the script calls `window.registerShortcut`, confirm `scope` is set (not relying on the `'global'` default) and that an `unregisterShortcut` / `panel.clearShortcuts()` cleanup path exists when the plugin can be torn down.
-11. **`localStorage` prefix.** Grep for `localStorage.` usage; keys must start with `<plugin_id>`.
-12. **`settings.server_files` paths are safe.** Each entry must be a relpath — no leading `/`, no `..`, no backslashes. The schema enforces this but call it out.
+9. **Capability-first frontend integration.** If the script wraps host globals or polls another plugin's globals, flag it as a capability gap unless the PR explicitly documents why no active domain can model the integration yet.
+10. **`localStorage` prefix.** Grep for `localStorage.` usage; keys must start with `<plugin_id>`.
+11. **`settings.server_files` paths are safe.** Each entry must be a relpath — no leading `/`, no `..`, no backslashes. The schema enforces this but call it out.
 
 ## Output format
 

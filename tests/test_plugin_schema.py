@@ -14,7 +14,7 @@ Four independent guarantees:
    sync because the same allowlist is referenced from both human-facing
    docs and from CI manifest validation.
 4. The schema accepts capability-pipelines.v1 manifest metadata so
-    native capability declarations are not blocked by legacy-only tooling.
+    native capability declarations stay first-class in tooling.
 """
 
 from __future__ import annotations
@@ -143,7 +143,7 @@ def test_in_tree_manifest_id_matches_directory(manifest_path: str) -> None:
 
 
 def test_capability_manifest_metadata_validates(schema: dict) -> None:
-    """Capability-aware manifests should validate alongside legacy plugin fields."""
+    """Capability-aware manifests should validate alongside runtime loader fields."""
     manifest = {
         "id": "capability_example",
         "name": "Capability Example",
@@ -174,7 +174,7 @@ def test_capability_manifest_metadata_validates(schema: dict) -> None:
                 "roles": ["observer"],
                 "observes": ["ready", "stopped"],
                 "mode": "active",
-                "compatibility": "shim-allowed",
+                "compatibility": "none",
                 "ownership": "observer-only",
                 "safety": "safe",
                 "version": 1,

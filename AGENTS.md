@@ -101,7 +101,7 @@ Slopsmith supports two:
 ## Frontend conventions
 
 - **No frameworks** — vanilla JS, fetch API, DOM manipulation
-- **Globals** — `highway`, `audio`, `playSong()`, `showScreen()`, `createHighway()`, `window.slopsmith`
+- **Plugin integration** — prefer documented capability domains, provider APIs, and redaction-safe UI contributions over private globals
 - **Storage** — `localStorage` for all user preferences, prefixed with plugin id
 - **Styling** — Tailwind utility classes; dark theme (`bg-dark-600`, `text-gray-300`, accent `#4080e0`, gold `#e8c040`)
 - **Naming** — camelCase for JS, kebab-case for CSS, snake_case for plugin IDs
@@ -125,12 +125,10 @@ Topic | Doc
 --- | ---
 Manifest reference (`plugin.json` fields) | [`docs/plugin-manifest.md`](docs/plugin-manifest.md)
 Capability declarations (`standards`, `capabilities`, `ui`) | [`docs/plugin-manifest.md#capabilities`](docs/plugin-manifest.md#capabilities)
-Visualization (setRenderer / overlay / note-state) | [`docs/plugin-visualization-contracts.md`](docs/plugin-visualization-contracts.md)
+Visualization contracts | [`docs/plugin-visualization-contracts.md`](docs/plugin-visualization-contracts.md)
 Plugin styles (`styles: "assets/plugin.css"`) | [`docs/plugin-styles.md`](docs/plugin-styles.md)
-Audio mixer fader registration | [`docs/plugin-audio-mixer.md`](docs/plugin-audio-mixer.md)
 Backend `context["log"]` logging | [`docs/plugin-logging.md`](docs/plugin-logging.md)
 Diagnostics opt-in (export bundle) | [`docs/plugin-diagnostics.md`](docs/plugin-diagnostics.md)
-Keyboard shortcuts (`registerShortcut`) | [`docs/plugin-keyboard-shortcuts.md`](docs/plugin-keyboard-shortcuts.md)
 Multi-file backends (`load_sibling`) | [`docs/plugin-sibling-imports.md`](docs/plugin-sibling-imports.md)
 WebSocket highway protocol | [`docs/websocket-protocol.md`](docs/websocket-protocol.md)
 Testing plugins (pytest + Playwright) | [`docs/testing-plugins.md`](docs/testing-plugins.md)
@@ -142,7 +140,7 @@ Tuning the note_detect plugin | [`docs/note-detect-tuning.md`](docs/note-detect-
 
 1. **`load_sibling` for cross-file backend plugins.** Bare `from extractor import X` in `routes.py` collides across plugins because Python caches by module name in `sys.modules`. Use `context["load_sibling"]("extractor")` — gets a per-plugin namespaced module. Full explanation: [`docs/plugin-sibling-imports.md`](docs/plugin-sibling-imports.md).
 
-2. **`playSong` wrapper race condition.** Plugins commonly wrap `window.playSong`. Wrappers chain outermost-first (last-loaded runs first). If an inner wrapper does `await import(CDN)`, it yields to the event loop and WebSocket messages (`song_info`, `ready`) can arrive before outer wrappers finish setup. Use `getSongInfo()` as a fallback, not `_onReady` alone.
+2. **Capability declarations are the integration map.** New plugin behavior should be visible in `standards`, `capabilities`, and `ui` metadata before runtime code hydrates. If the domain you need is missing, document it as a capability gap instead of adding another private global contract.
 
 3. **Highway flex layout.** `#highway` has `flex:1` in the player. Hiding it with `display:none` removes the flex child and `#player-controls` floats to the top. If you must hide the highway, add `margin-top: auto` to the controls div.
 
@@ -171,7 +169,7 @@ python -c "import json,glob,jsonschema; s=json.load(open('schema/plugin.schema.j
 - **No frontend frameworks.** Vanilla JS, fetch API, Tailwind classes. Don't add React/Vue/Svelte.
 - **Backend logging.** Plugin `routes.py` must use `context["log"]`, never `print()`. See [`docs/plugin-logging.md`](docs/plugin-logging.md).
 - **Plugin Python imports.** Multi-file backends use `context["load_sibling"]("<module>")`, not bare `from <module> import`. See [`docs/plugin-sibling-imports.md`](docs/plugin-sibling-imports.md).
-- **Capability metadata.** New plugin integrations should declare `standards: ["capability-pipelines.v1"]` plus redaction-safe `capabilities`/`ui` metadata rather than relying only on private globals.
+- **Capability metadata.** New plugin integrations should declare `standards: ["capability-pipelines.v1"]` plus redaction-safe `capabilities`/`ui` metadata as the primary integration contract.
 - **Spec-kit owns `.specify/` and `specs/`.** Don't modify those without explicit instruction; the `/speckit-*` skills own that surface.
 
 ## Tool-specific surfaces (optional reading)

@@ -147,118 +147,6 @@ Existing plugins can keep using `window.slopsmith.audio.registerFader(spec)` whi
 
 Native audio-mix fader providers should register a stable participant id and fader id, return the committed value from every set operation, and settle get/set operations within two seconds. The player mixer displays the committed value rather than the raw requested value. If the fader is temporarily unavailable, keep the participant registered with unavailable/disabled state so the mixer can render a disabled control and diagnostics can explain why it cannot be changed.
 
-During migration, a plugin may still call `window.slopsmith.audio.registerFader(spec)`. Core maps that legacy fader into a compatibility-backed audio-mix participant and records bridge hits. If a native participant and a legacy fader represent the same logical source, the native participant owns the visible control and the legacy path is reported as compatibility-backed/overshadowed.
-
-## Audio Effects Provider
-
-Plugins that can provide guitar/bass processing chains should declare `audio-effects` as a provider and register at runtime with `window.slopsmith.audioEffects.registerProvider(...)`. The provider returns opaque chain plans; it must not expose local filenames, URLs, native preset JSON, VST state blobs, or raw handles through diagnostics or public route state.
-
-```json
-{
-  "id": "rig_builder",
-  "name": "Rig Builder",
-  "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"],
-  "capabilities": {
-    "audio-effects": {
-      "roles": ["provider"],
-      "operations": ["chain.resolve", "chain.inspect", "segment.activate", "stage.set-bypass", "stage.set-parameter"],
-      "events": ["provider-registered", "route-selected", "plan-resolved", "changed", "fallback", "bridge-hit"],
-      "mode": "active",
-      "compatibility": "shim-allowed",
-      "safety": "sensitive",
-      "version": 1
-    }
-  }
-}
-```
-
-```js
-const effects = window.slopsmith && window.slopsmith.audioEffects;
-effects.registerProvider({
-  providerId: 'rig-builder',
-  pluginId: 'rig_builder',
-  routeKey: 'desktop-main',
-  priority: 40,
-  operations: ['chain.resolve', 'segment.activate', 'stage.set-bypass', 'stage.set-parameter'],
-  operationHandlers: {
-    'chain.resolve': request => ({
-      outcome: 'handled',
-      plan: {
-        schema: 'slopsmith.audio_effects.chain_plan.v1',
-        planId: 'song-tone-plan',
-        routeKey: request.routeKey,
-        providerId: 'rig-builder',
-        stages: [
-          { stageId: 'amp', kind: 'nam', role: 'amp', assetRef: 'rig-builder:asset:amp-main' },
-          { stageId: 'cab', kind: 'ir', role: 'cab', assetRef: 'rig-builder:asset:cab-main' }
-        ],
-        segments: [{ segmentId: 'base', stageIds: ['amp', 'cab'] }],
-        summary: { stageCount: 2 }
-      }
-    })
-  }
-});
-```
-
-User-facing controls should dispatch through the domain instead of mutating another plugin's private state:
-
-```js
-await window.slopsmith.capabilities.dispatch({
-  capability: 'audio-effects',
-  command: 'select-chain',
-  source: 'rig_builder',
-  payload: { routeKey: 'desktop-main', providerId: 'rig-builder', authorization: 'user-action' }
-});
-
-const resolved = await window.slopsmith.capabilities.dispatch({
-  capability: 'audio-effects',
-  command: 'resolve-plan',
-  source: 'nam_tone',
-  payload: { routeKey: 'desktop-main', target: { settingsKey: 'settings-v1-...' } }
-});
-```
-
-Providers should store public song/tone routing through the host-owned mapping index and keep their own preset or chain rows private. The mapping's `provider_ref` is opaque to core: NAM Tone can use a preset id, Rig Builder can use a chain/preset id, and each provider resolves that reference in `chain.resolve`.
-
-```js
-await window.slopsmith.audioEffects.upsertMapping({
-  song_key: playbackTarget.settingsKey,
-  filename: playbackTarget.filename, // optional migration/debug context
-  tone_key: 'Dist',
-  provider_id: 'rig-builder',
-  provider_ref: 'chain:99',
-  label: 'Full Rig Builder chain',
-  source: 'manual',
-  active: true
-});
-
-const mappings = await window.slopsmith.audioEffects.listMappings({
-  song_key: playbackTarget.settingsKey,
-  tone_key: 'Dist'
-});
-```
-
-Only one mapping is active for a `song_key + tone_key` at a time, but multiple providers may have rows for the same song/tone. The active row decides which provider core asks first; provider fallback remains explicit through provider priority and `fallbackProviderId` during `loadPlan(...)`.
-
-Browser or native executors should declare both provider scope and plan scope. A NAM-only browser executor should not claim Rig Builder plans just because it can load NAM files:
-
-```js
-window.slopsmith.audioEffects.registerExecutor({
-  executorId: 'nam-tone-browser-wasm',
-  pluginId: 'nam_tone',
-  routeKey: 'desktop-main',
-  providerIds: ['nam-tone'],
-  supportedKinds: ['nam', 'ir'],
-  maxStages: 2,
-  sourceMode: 'browser',
-  loadChainPlan: request => loadNamToneWasmPlan(request)
-});
-```
-
-Trusted Desktop can advertise broader support, while provider-specific browser executors should keep their `providerIds`, `supportedKinds`, and `maxStages` as narrow as the runtime actually supports.
-
-The desktop executor is the trust boundary for physical loading. It should treat `assetRef` and `stateRef` values as opaque provider references, validate them through provider-owned lookup code, enforce local policy, then load or reject processor stages. Browser diagnostics should report route/provider/outcome summaries only.
-
 ## Audio Input And Monitoring Requester
 
 Plugins that need live instrument input should declare requester/observer intent and let the host expose redaction-safe source identity. Diagnostics must not contain raw device labels, stable hardware ids, or audio buffers.
@@ -274,7 +162,7 @@ Plugins that need live instrument input should declare requester/observer intent
       "requests": ["inspect", "list-sources", "select-source", "open-source", "close-source"],
       "observes": ["source-registered", "source-selected", "source-opened", "source-open-degraded", "source-closed", "permission-denied"],
       "mode": "active",
-      "compatibility": "shim-allowed",
+      "compatibility": "none",
       "ownership": "requester-only",
       "safety": "sensitive",
       "version": 1
@@ -284,7 +172,7 @@ Plugins that need live instrument input should declare requester/observer intent
       "requests": ["inspect", "list-providers", "select-provider", "start", "stop", "set-direct-monitor"],
       "observes": ["provider-registered", "provider-selected", "provider-selection-required", "monitoring-started", "monitoring-degraded", "monitoring-unavailable", "monitoring-failed", "monitoring-denied", "monitoring-stopped", "direct-monitor-changed"],
       "mode": "active",
-      "compatibility": "shim-allowed",
+      "compatibility": "none",
       "ownership": "requester-only",
       "safety": "sensitive",
       "version": 1
@@ -400,7 +288,7 @@ The Stems plugin remains the provider/owner of actual stem playback state. `core
       "operations": ["stem.get-state", "stem.apply-automation", "stem.restore-automation"],
       "events": ["owner-available", "automation-applied", "automation-restored", "automation-overridden", "claim-orphaned"],
       "mode": "active",
-      "compatibility": "shim-allowed",
+      "compatibility": "none",
       "ownership": "exclusive-owner",
       "safety": "safe",
       "version": 1
@@ -411,7 +299,7 @@ The Stems plugin remains the provider/owner of actual stem playback state. `core
 
 ## Playback Requester And Observer
 
-Plugins that need to inspect or coordinate song transport should declare `playback` requester/observer intent and use the capability dispatch surface instead of wrapping `window.playSong` or scraping the `<audio>` element. Raw media handles stay private to core; diagnostics expose only pseudonymous targets, sanitized timing, route, loop, requester, observer, and recent outcome summaries.
+Plugins that need to inspect or coordinate song transport should declare `playback` requester/observer intent and use the capability dispatch surface. Raw media handles stay private to core; diagnostics expose only pseudonymous targets, sanitized timing, route, loop, requester, observer, and recent outcome summaries.
 
 ```json
 {
@@ -424,7 +312,7 @@ Plugins that need to inspect or coordinate song transport should declare `playba
       "requests": ["inspect", "pause", "resume", "seek", "set-loop", "clear-loop"],
       "observes": ["ready", "started", "paused", "resumed", "seeking", "seeked", "stopped", "loop-set", "loop-cleared"],
       "mode": "active",
-      "compatibility": "shim-allowed",
+      "compatibility": "none",
       "ownership": "requester-only",
       "safety": "safe",
       "version": 1
@@ -455,106 +343,10 @@ if (state.status !== 'idle') {
 }
 ```
 
-During migration, legacy uses of `window.playSong`, `song:*` events, `window.slopsmith.seek`, and loop helpers remain available and are recorded as playback bridge hits. Treat bridge hits as migration telemetry: native capability requests should eventually cover normal plugin workflows so unexpected legacy hits disappear from diagnostics.
-
-## Progression Requester And Observer
-
-Plugins that report gameplay outcomes or react to player progression (spec 010) should declare `progression` requester/observer intent and use capability dispatch instead of private fetches. Externally postable event types are whitelisted (`minigame_run` in v1); `song_completed` is server-derived inside `/api/stats` and is denied at this surface. Backend plugin code can use the plugin-context hook `record_progression_event` instead (the minigames hub does).
-
-```json
-{
-  "id": "my_minigame",
-  "name": "My Minigame",
-  "standards": ["capability-pipelines.v1"],
-  "capabilities": {
-    "progression": {
-      "roles": ["requester", "observer"],
-      "requests": ["inspect", "record-event"],
-      "observes": ["challenge-completed", "quest-completed", "path-level-up", "rank-changed", "db-changed"],
-      "mode": "active",
-      "compatibility": "none",
-      "ownership": "requester-only",
-      "safety": "safe",
-      "version": 1
-    }
-  }
-}
-```
-
-`buy-item` and `equip-item` require a visible user gesture (`authorization: "user-action"`). Decibels are play-earned only; plugins must not present any purchase path.
-
-```js
-const api = window.slopsmith.capabilities;
-
-const result = await api.dispatch({
-  capability: 'progression',
-  command: 'record-event',
-  source: 'my_minigame',
-  payload: { type: 'minigame_run', payload: { game_id: 'my-minigame', score: 420 } },
-});
-// result.payload lists challenges/quests completed by this event (toast UX).
-
-window.slopsmith.on('progression:quest-completed', (e) => {
-  console.log('quest done:', e.detail.title, '+' + e.detail.reward_db + ' dB');
-});
-```
-
 ## Future Expansion Domains
 
 Some domain names are reserved for expected future contracts, but they are not registered in the runtime graph yet. For example, `ui.player-panels` is documented as a likely panel-host surface, but Slopsmith does not currently expose a capability command for panel contributions. See [capability-roadmap.md](capability-roadmap.md) for the PR1 domain set and deferred-domain checklist.
 
 Plugins should not declare future expansion domains until the corresponding host workflow ships. For current integrations, prefer active domains such as `library`, `playback`, `audio-mix`, `audio-input`, `audio-monitoring`, or `stems` intent matching the recipes above.
 
-Invalid capability metadata is excluded from the capability graph, but legacy manifest fields still load through their existing app paths. The `library` workflow is native in PR1 and does not use compatibility shim metadata. Unsupported `capability-pipelines` versions are reported as incompatible and their runtime handlers must not execute.
-
-## Library Card Action (`ui.library-card-injection`)
-
-Delivered in fee[dB]ack v0.3.0 (frontend host). Plugins add per-song actions to
-the library cards by REGISTERING them instead of DOM-injecting onto
-`.song-card`. The library renders applicable actions in each card's action
-menu, dispatches the handler on click, and emits `action-result` events;
-the owner is visible in the Capability Inspector.
-
-```json
-{
-  "id": "my_card_action",
-  "name": "My Card Action",
-  "standards": ["capability-pipelines.v1"],
-  "capabilities": {
-    "ui.library-card-injection": {
-      "roles": ["provider"],
-      "operations": ["action.run"],
-      "events": ["action-registered", "action-result"],
-      "mode": "active",
-      "compatibility": "none",
-      "safety": "safe",
-      "version": 1
-    }
-  }
-}
-```
-
-Register the action from the plugin's `screen.js`:
-
-```js
-window.slopsmith.libraryCardActions.register({
-  id: 'my_card_action.run',
-  pluginId: 'my_card_action',
-  label: 'Do the thing',
-  placement: 'menu',                 // 'menu' | 'inline' | 'overlay'
-  order: 50,
-  applies: (song) => song.format === 'sloppak',  // shown only when relevant
-  enabled: (song) => true,
-  run: async (song, ctx) => {        // ctx.source identifies the surface
-    await fetch('/api/plugins/my_card_action/run', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: song.filename }),
-    });
-  },
-});
-```
-
-`register(spec)` returns an `unregister()` fn. The host owns rendering,
-applicability, enabled state, and `action-result` events — plugins do not touch
-library DOM. Legacy `.song-card` DOM injection still works in the 0.2.x UI;
-migrate to this for the v0.3.0 native library.
+Invalid capability metadata is excluded from the capability graph. The `library` workflow is native in PR1 and does not use compatibility shim metadata. Unsupported `capability-pipelines` versions are reported as incompatible and their runtime handlers must not execute.

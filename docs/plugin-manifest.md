@@ -11,8 +11,6 @@ Every plugin lives in `plugins/<name>/` and must declare a `plugin.json` manifes
   "version": "1.0.0",
   "private": false,
   "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"],
-  "type": "visualization",
-  "nav": { "label": "My Plugin", "screen": "plugin-my_plugin" },
   "screen": "screen.html",
   "script": "screen.js",
   "styles": "assets/plugin.css",
@@ -30,7 +28,8 @@ Every plugin lives in `plugins/<name>/` and must declare a `plugin.json` manifes
     "packable_keys": ["enabled"]
   },
   "ui": {
-    "settings": [{ "id": "my-plugin-settings", "region": "plugin-settings", "label": "My Plugin" }]
+    "settings": [{ "id": "my-plugin-settings", "region": "plugin-settings", "label": "My Plugin" }],
+    "ui.plugin-screens": [{ "id": "my-plugin-screen", "region": "plugin.main", "label": "My Plugin" }]
   },
   "capabilities": {
     "library": {
@@ -46,7 +45,7 @@ Every plugin lives in `plugins/<name>/` and must declare a `plugin.json` manifes
 }
 ```
 
-All fields except `id` and `name` are optional. Plugins can have any combination of frontend (screen/script), backend (routes), and settings.
+All fields except `id` and `name` are optional. Runtime files such as `screen`, `script`, `routes`, and `settings.html` should correspond to declared `capabilities`, `ui`, diagnostics, or settings metadata.
 
 ## Fields
 
@@ -68,7 +67,7 @@ Advisory metadata for plugin authors. Not consumed by the loader.
 
 ### `standards` (string[], optional)
 
-Versioned contracts the plugin participates in. New capability-aware plugins should declare `"capability-pipelines.v1"` when they include native `capabilities`, `ui`, `runtime_domains`, or related metadata.
+Versioned contracts the plugin participates in. New plugins should declare `"capability-pipelines.v1"` when they include native `capabilities`, `ui`, or related metadata.
 
 Declare `"plugin-runtime-idempotent.v1"` only when repeated script hydration cannot duplicate wrappers, listeners, timers, DOM roots, diagnostics contributors, jobs, media nodes, or capability participants.
 
@@ -79,16 +78,6 @@ Explicit capability API marker. Most plugins can use the compact `standards` for
 ```json
 { "capability_api": { "standard": "capability-pipelines.v1", "version": 1 } }
 ```
-
-### `type` (string, optional — role hint, slopsmith#36)
-
-Supported values:
-- `"visualization"` — plugin provides a highway renderer. Declaring this makes the plugin eligible for the main-player viz picker AND splitscreen's per-panel picker. Must pair with a `window.slopsmithViz_<id>` factory exporting the setRenderer contract (see [plugin-visualization-contracts.md](plugin-visualization-contracts.md)).
-- Absent → no declared role; plugin is loaded and its script runs, but it doesn't appear in role-specific UIs.
-
-### `nav` (object, optional)
-
-`{ "label": string, "screen": string }` — adds a navbar entry that calls `showScreen(<screen>)`. `screen` is typically `plugin-<id>`.
 
 ### `screen` (string, optional)
 
@@ -139,7 +128,7 @@ Redaction-safe settings metadata for support tooling and capability diagnostics.
 
 ### `ui` / `ui_contributions` (object, optional)
 
-Native UI contribution declarations keyed by UI domain or surface. These let Slopsmith attribute plugin UI to stable contribution records while legacy `nav`, `screen`, `settings`, visualization picker entries, shortcuts, overlays, player panels, and tours continue to work through compatibility bridges.
+Native UI contribution declarations keyed by UI domain or surface. Use these whenever a plugin contributes settings panels, plugin screens, player controls, overlays, tours, or other host-visible UI so Slopsmith can attribute UI to stable contribution records.
 
 Example:
 
@@ -175,9 +164,9 @@ Native `capability-pipelines.v1` declarations keyed by capability domain. They d
     "playback": {
       "roles": ["observer"],
       "observes": ["loading", "ready", "stopped", "ended"],
-      "description": "Observes playback lifecycle without wrapping window.playSong.",
+      "description": "Observes playback lifecycle through playback capability events.",
       "mode": "active",
-      "compatibility": "shim-allowed",
+      "compatibility": "none",
       "ownership": "observer-only",
       "safety": "safe",
       "version": 1
@@ -191,18 +180,14 @@ Supported declaration fields include:
 - `roles`: `owner`, `coordinator`, `provider`, `observer`, `requester`, `transformer`, `handler`, `validator`, `short-circuiter`, `contributor`
 - `commands`, `operations`, `requests`, `observes`, `emits`, `events`: string arrays naming public commands, provider operations, or events
 - `kind`: `command`, `provider-coordinator`, `event`, `diagnostic`, `privileged`
-- `mode`: `active`, `optional`, `legacy-shim`, `disabled`
-- `compatibility`: `none`, `shim-allowed`, `degrade-noop`, `required`, `legacy-window-shim`
+- `mode`: `active`, `optional`, `disabled`
+- `compatibility`: prefer `none` for new declarations
 - `ownership`: `exclusive-owner`, `multi-provider`, `observer-only`, `requester-only`, `privileged`, `diagnostic-only`
 - `safety`: `safe`, `privileged`, `sensitive`, `diagnostic-only`
 - `description` / `summary`: short redaction-safe text for local tooling
 - `version`: `1`
 
-Invalid capability metadata is rejected by schema validation and ignored by runtime capability tooling; legacy plugin fields still load through their existing app paths.
-
-### `runtime_domains` / `domains` (object, optional)
-
-Legacy bridge declarations for older runtime-domain metadata. Prefer `capabilities` for new native declarations.
+Invalid capability metadata is rejected by schema validation and ignored by runtime capability tooling. Fix invalid metadata rather than relying on undocumented runtime behavior.
 
 ### `license` (string, optional but recommended)
 
