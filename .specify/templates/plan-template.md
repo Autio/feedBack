@@ -31,7 +31,29 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+Answer each gate with PASS / FAIL / N/A and a short justification:
+
+- **Self-hosted Docker path**: Does the feature keep `DLC_DIR` and
+  `CONFIG_DIR` as the only required runtime inputs, with any new
+  dependency installable in the existing Docker image?
+- **Vanilla/source-served frontend**: Does core remain plain JS and
+  committed CSS, with no framework, runtime CDN/JIT, bundler, or
+  serve-path build step? If plugin CSS is needed, does it ship through
+  `styles`?
+- **Plugin and capability boundary**: If the feature is outside browse +
+  play CDLC, is it plugin-shaped? Does every Slopsmith-facing plugin
+  behavior declare `capability-pipelines.v1` metadata (`capabilities`,
+  `ui`, or `ui_contributions`) and use `load_sibling` for backend
+  siblings?
+- **CDLC compatibility**: Are PSARC scanning, sloppak manifests,
+  arrangement IDs, and highway WebSocket messages kept backward-
+  compatible, or is a migration note planned?
+- **Pure/testable core**: Are new `lib/` helpers flat-importable,
+  side-effect-light, and covered where practical?
+- **Observability and diagnostics**: Does backend output use logging,
+  and do diagnostics remain redacted and versioned?
+- **Settings/versioning**: Are settings imports/export paths safe,
+  additive/idempotent, and compatible with the `VERSION` workflow?
 
 ## Project Structure
 

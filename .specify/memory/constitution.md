@@ -1,13 +1,28 @@
+<!--
+Sync Impact Report
+Version change: 1.1.0 -> 1.2.0
+Modified principles:
+- III. Plugins Are the Extension Point — Isolated by `load_sibling` -> III. Plugins Are the Extension Point — Capability-Declared and Isolated
+Added sections: None
+Removed sections: None
+Templates requiring updates:
+- [updated] .specify/templates/plan-template.md — Constitution Check now names Slopsmith's concrete gates, including plugin capability declarations.
+- [reviewed] .specify/templates/spec-template.md — no structural update required; requirements remain feature-focused.
+- [reviewed] .specify/templates/tasks-template.md — no structural update required; the plan gate drives capability-related tasks.
+- [reviewed] .specify/templates/checklist-template.md — no structural update required.
+Follow-up TODOs: None
+-->
+
 # Slopsmith Constitution
 
 > Slopsmith is a self-hosted, single-user web app for browsing, playing, and
-> practicing interactive music notation, built around its own open `.sloppak`
+practicing interactive music notation, built around its own open `.sloppak`
 > chart format (charts imported from Guitar Pro / MusicXML or authored in the
 > built-in editor). This constitution captures the non-negotiable principles
 > that govern its core (`server.py`, `lib/`, `static/`) and that all in-tree
 > plugins (`plugins/<name>/`) inherit by default. It is a *retrospective*
 > document — the codebase came first, the principles below were distilled from
-> `CLAUDE.md`, `README.md`, and the shape of the existing implementation.
+> `AGENTS.md`, `README.md`, and the shape of the existing implementation.
 
 ## Core Principles
 
@@ -69,28 +84,45 @@ features extend `app.js` and the existing globals (`window.playSong`,
   layout invariants (`#player` flex-column, `#highway` flex:1,
   `#player-controls` at the bottom) MUST be preserved.
 
-### III. Plugins Are the Extension Point — Isolated by `load_sibling`
+### III. Plugins Are the Extension Point — Capability-Declared and Isolated
 
 Functionality that is not part of the irreducible "browse + play charts"
 loop ships as a plugin under `plugins/<name>/`, not as core code. Each
 plugin is its own directory (typically a separate git repo), discovered
 at startup via `plugin.json`, and free to add nav links, screens,
-settings panels, and `/api/plugins/<id>/...` routes. Plugins MUST
-isolate their backend Python imports via `context["load_sibling"]` so
-two plugins shipping a generic `extractor.py` / `util.py` / `client.py`
-do not collide in `sys.modules`.
+settings panels, and `/api/plugins/<id>/...` routes. Slopsmith-facing
+plugin behavior is capability-declared by default: manifests describe
+the domains a plugin owns, provides, requests, observes, validates, or
+contributes to before any runtime script hydrates. Runtime handlers,
+legacy wrappers, and private globals are implementation details or
+compatibility bridges, never the primary integration contract. Plugins
+MUST isolate their backend Python imports via `context["load_sibling"]`
+so two plugins shipping a generic `extractor.py` / `util.py` /
+`client.py` do not collide in `sys.modules`.
 
 **Non-negotiable rules**
 
 - Generic features (practice journal, setlist, metronome, tone player,
   tab view, MIDI control, stem mixing, editors, etc.) belong in a plugin
   repo, not in `lib/` or `server.py`.
+- Plugins with Slopsmith-facing behavior MUST declare
+  `standards: ["capability-pipelines.v1"]` plus redaction-safe
+  `capabilities`, `ui`, or `ui_contributions` metadata for the behavior
+  they expose. Metadata-only or transitional manifests that omit
+  capability participation MUST document why no current domain applies.
+- Runtime participants, event listeners, wrapper hooks, timers, DOM
+  roots, diagnostics contributors, and media nodes MUST be idempotent
+  across repeated script hydration. If a wrapper or private global is
+  still required, it MUST be documented as a compatibility bridge or a
+  missing capability-domain gap.
 - Plugin backend modules MUST use `context["load_sibling"]("name")` for
   sibling imports. Bare `import sibling` works during transition but
   triggers a startup warning when a name collides.
 - Plugins MUST register routes under `/api/plugins/<plugin_id>/...`,
-  use `window.slopsmith.emit/on` for cross-plugin communication, and
-  prefix their `localStorage` keys with their plugin id.
+  use capability commands/events when an active domain exists, and
+  prefix their `localStorage` keys with their plugin id. General
+  `window.slopsmith.emit/on` events remain acceptable for host events or
+  domains that have not yet been promoted.
 - Plugins inherit this constitution and may layer additional rules in
   their own `CLAUDE.md`, but MUST NOT relax core principles (e.g. a
   plugin cannot require a frontend framework in core).
@@ -207,11 +239,12 @@ no `..`, no absolute paths).
   `flex:1`; `#player-controls` sits at the bottom. Hiding the highway
   collapses the layout — use `margin-top: auto` on controls if you
   need to hide it.
-- **Plugin load order**: alphabetical by directory name. The
-  `playSong` wrapper chain runs outermost-first (last-loaded wrapper
-  runs first). Plugins MUST tolerate dependent globals being absent
-  at load time and check at runtime
-  (`typeof window.X === 'function'`).
+- **Plugin load order**: alphabetical by directory name. Scripts MUST
+  tolerate dependent globals being absent at load time and check at
+  runtime (`typeof window.X === 'function'`). Load order and the
+  `playSong` wrapper chain are implementation details, not integration
+  contracts; plugins declare roles, ownership, compatibility, and UI
+  contributions through capability metadata.
 
 ## Development Workflow
 
@@ -225,8 +258,9 @@ no `..`, no absolute paths).
   After pushing a fix, the CodeRabbit loop
   (`feedback_coderabbit_review.md`) runs to silence.
 - **Testing**: `pytest` for backend (`requirements-test.txt`),
-  Playwright for browser interactions (`tests/browser/`), CI runs both
-  on every push/PR to `main`.
+  Playwright for browser interactions (`tests/browser/`), and plugin
+  manifest schema validation for capability metadata. CI runs these on
+  every relevant push/PR to `main`.
 - **CHANGELOG**: every PR updates `[Unreleased]`. Releases rename
   `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD` (the VERSION bump itself is
   automated).
@@ -246,12 +280,13 @@ no `..`, no absolute paths).
   explicit constitutional amendment in this file.
 - Amendments require: (a) a PR that updates this file alongside the
   code change, (b) an entry in `CHANGELOG.md` under "Migration notes"
-  if user-visible, and (c) a corresponding update to `CLAUDE.md` so
-  AI agents and humans see the same source of truth.
+  if user-visible, and (c) a corresponding update to `AGENTS.md` and any
+  agent-specific imports or instructions so AI agents and humans see the
+  same source of truth.
 - The principles are listed in priority order. When two principles
   conflict (e.g. "vanilla frontend" vs. a plugin that wants to ship
   React), the lower-numbered principle wins by default; the
   higher-numbered principle's escape hatch is to live in a plugin
   with its own bundled assets.
 
-**Version**: 1.1.0 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-06-01
+**Version**: 1.2.0 | **Ratified**: 2026-05-09 | **Last Amended**: 2026-06-03
