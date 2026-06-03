@@ -7,12 +7,8 @@ Four independent guarantees:
 2. Each in-tree manifest's `id` matches its parent directory name —
    the loader assumes this and silent drift would break plugin
    discovery.
-3. The `license` enum in the schema is a subset of the SPDX identifiers
-   listed in `CONTRIBUTING.md`'s "Plugin licensing" curated allowlist.
-   If you edit the allowlist in `CONTRIBUTING.md`, run pytest locally
-   and update the schema enum to match — these two files must stay in
-   sync because the same allowlist is referenced from both human-facing
-   docs and from CI manifest validation.
+3. The `license` enum in the schema enforces AGPL-3.0-only for
+    contributed manifests.
 4. The schema accepts capability-pipelines.v1 manifest metadata so
     native capability declarations stay first-class in tooling.
 """
@@ -69,6 +65,7 @@ def test_schema_contains_capability_contract(schema: dict) -> None:
     assert "diagnostic-only" in declaration["properties"]["safety"]["enum"]
     assert "styles" in schema["properties"]
     assert schema["properties"]["styles"]["pattern"].startswith("^assets/")
+    assert "pluginRelpath" in schema["$defs"]
 
 
 def test_docs_schema_capability_contract_matches_ci_schema(schema: dict, docs_schema: dict) -> None:
@@ -80,8 +77,9 @@ def test_docs_schema_capability_contract_matches_ci_schema(schema: dict, docs_sc
             return [without_descriptions(item) for item in value]
         return value
 
-    for key in ("standards", "capability_api", "capabilities", "ui", "ui_contributions", "runtime_domains", "domains", "settings_schema", "styles"):
+    for key in ("standards", "capability_api", "capabilities", "ui", "ui_contributions", "runtime_domains", "domains", "settings_schema", "styles", "screen", "script", "routes", "tour", "settings"):
         assert without_descriptions(docs_schema["properties"][key]) == without_descriptions(schema["properties"][key])
+    assert without_descriptions(docs_schema["$defs"]["pluginRelpath"]) == without_descriptions(schema["$defs"]["pluginRelpath"])
     assert without_descriptions(docs_schema["$defs"]["domainName"]) == without_descriptions(schema["$defs"]["domainName"])
     assert without_descriptions(docs_schema["$defs"]["capabilityDeclaration"]) == without_descriptions(schema["$defs"]["capabilityDeclaration"])
     assert without_descriptions(docs_schema["$defs"]["domainDeclaration"]) == without_descriptions(schema["$defs"]["domainDeclaration"])
@@ -148,6 +146,7 @@ def test_capability_manifest_metadata_validates(schema: dict) -> None:
         "id": "capability_example",
         "name": "Capability Example",
         "version": "0.1.0",
+        "license": "AGPL-3.0-only",
         "standards": ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"],
         "script": "screen.js",
         "settings": {"html": "settings.html"},
@@ -214,48 +213,35 @@ def test_invalid_capability_metadata_fails_schema(schema: dict) -> None:
         jsonschema.validate(manifest, schema)
 
 
-def _extract_allowlist_from_contributing() -> set[str]:
-    """Pull the curated-license allowlist out of CONTRIBUTING.md.
+def test_schema_license_enum_requires_agpl_only(schema: dict) -> None:
+    """Contributed manifests must not validate with non-AGPL licenses."""
+    assert schema["properties"]["license"]["enum"] == ["AGPL-3.0-only"]
 
-    Looks at the "Plugin licensing" section: any bullet line whose text
-    starts with a recognized SPDX-shape identifier is considered part of
-    the allowlist. Forms like "AGPL-3.0-only or AGPL-3.0-or-later" are
-    split on " or ".
-    """
-    text = CONTRIBUTING_PATH.read_text(encoding="utf-8")
-    section = text.split("## Plugin licensing", 1)
-    if len(section) < 2:
-        pytest.fail("'## Plugin licensing' section not found in CONTRIBUTING.md")
-    body = section[1].split("\n## ", 1)[0]
-
-    spdx_re = re.compile(r"^[A-Za-z0-9.+-]+$")
-    allowlist: set[str] = set()
-    for line in body.splitlines():
-        if not line.lstrip().startswith("- "):
-            continue
-        rest = line.lstrip()[2:].strip()
-        # Strip trailing punctuation / parenthetical notes.
-        rest = re.split(r"\s*\(|\s*—|\s*--", rest)[0].strip().rstrip(".,;")
-        for token in re.split(r"\s+or\s+|\s*/\s+|\s*,\s+", rest):
-            token = token.strip().rstrip(".,;").strip()
-            if token and spdx_re.match(token):
-                allowlist.add(token)
-    return allowlist
+    manifest = {"id": "license_example", "name": "License Example", "license": "MIT"}
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(manifest, schema)
 
 
-def test_schema_license_enum_subset_of_contributing_allowlist(schema: dict) -> None:
-    """Schema's license enum must be ⊆ CONTRIBUTING.md curated allowlist.
+def test_plugin_runtime_paths_are_plugin_relative(schema: dict) -> None:
+    """Runtime file path fields must reject escapes and URL suffixes."""
+    valid = {
+        "id": "path_example",
+        "name": "Path Example",
+        "screen": "screen.html",
+        "script": "assets/screen.js",
+        "routes": "routes.py",
+        "tour": "tours/intro.json",
+        "settings": {"html": "settings/settings.html"},
+    }
+    jsonschema.validate(valid, schema)
 
-    If you add a license to the schema enum, also list it in
-    CONTRIBUTING.md "Plugin licensing". Direction matters: schema ⊆
-    allowlist (the schema can be stricter than what CONTRIBUTING.md
-    documents — typically the schema *equals* the allowlist).
-    """
-    license_enum = set(schema["properties"]["license"]["enum"])
-    allowlist = _extract_allowlist_from_contributing()
-    missing = license_enum - allowlist
-    assert not missing, (
-        f"License enum values present in schema/plugin.schema.json but "
-        f"not listed in CONTRIBUTING.md 'Plugin licensing' section: {sorted(missing)}. "
-        f"Update CONTRIBUTING.md or remove from the schema enum."
-    )
+    for field in ("screen", "script", "routes", "tour"):
+        for bad_path in ("../escape.html", "safe/../escape.html", "/abs.html", "C:/abs.html", "dir\\file.js", "screen.html?x=1", "screen.html#frag", "./screen.html", ".hidden"):
+            manifest = {"id": "bad_path_example", "name": "Bad Path Example", field: bad_path}
+            with pytest.raises(jsonschema.ValidationError):
+                jsonschema.validate(manifest, schema)
+
+    for bad_path in ("../settings.html", "settings/../settings.html", "/settings.html", "settings\\settings.html", "settings.html?x=1", "settings.html#frag", "./settings.html", ".settings.html"):
+        manifest = {"id": "bad_settings_path", "name": "Bad Settings Path", "settings": {"html": bad_path}}
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(manifest, schema)

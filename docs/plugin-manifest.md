@@ -180,7 +180,7 @@ Supported declaration fields include:
 - `roles`: `owner`, `coordinator`, `provider`, `observer`, `requester`, `transformer`, `handler`, `validator`, `short-circuiter`, `contributor`
 - `commands`, `operations`, `requests`, `observes`, `emits`, `events`: string arrays naming public commands, provider operations, or events
 - `kind`: `command`, `provider-coordinator`, `event`, `diagnostic`, `privileged`
-- `mode`: `active`, `optional`, `disabled`
+- `mode`: `active`, `optional`, `legacy-shim`, `disabled`
 - `compatibility`: prefer `none` for new declarations
 - `ownership`: `exclusive-owner`, `multi-provider`, `observer-only`, `requester-only`, `privileged`, `diagnostic-only`
 - `safety`: `safe`, `privileged`, `sensitive`, `diagnostic-only`
@@ -191,7 +191,7 @@ Invalid capability metadata is rejected by schema validation and ignored by runt
 
 ### `license` (string, optional but recommended)
 
-SPDX identifier. For curated plugins, must be AGPL-3.0-or-later or AGPL-compatible (MIT, BSD-2-Clause, BSD-3-Clause, Apache-2.0). See [CONTRIBUTING.md](../CONTRIBUTING.md).
+SPDX identifier. Contributions must use `AGPL-3.0-only`. See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Backend routes — `setup(app, context)`
 

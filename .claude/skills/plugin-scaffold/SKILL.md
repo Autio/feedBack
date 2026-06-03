@@ -30,7 +30,7 @@ If the plugin slug or type is missing, ask once.
 
 **Common to all types:**
 
-- `plugins/<id>/plugin.json` — schema-valid manifest. Set `id`, `name`, `version: "0.1.0"`, `license: "AGPL-3.0-only"`, and `standards: ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"]` by default (ask if a different license is desired).
+- `plugins/<id>/plugin.json` — schema-valid manifest. Set `id`, `name`, `version: "0.1.0"`, `license: "AGPL-3.0-only"`, and `standards: ["capability-pipelines.v1", "plugin-runtime-idempotent.v1"]` by default.
 
 **`type=visualization`** — adds:
 - `"type": "visualization"` and `"script": "screen.js"` to manifest

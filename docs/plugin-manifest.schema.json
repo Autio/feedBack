@@ -95,15 +95,41 @@
       "type": "object"
     },
     "nav": {},
-    "screen": {},
-    "script": {},
-    "routes": {},
-    "settings": {},
+    "screen": {
+      "$ref": "#/$defs/pluginRelpath"
+    },
+    "script": {
+      "$ref": "#/$defs/pluginRelpath"
+    },
+    "routes": {
+      "$ref": "#/$defs/pluginRelpath"
+    },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "html": {
+          "$ref": "#/$defs/pluginRelpath"
+        },
+        "server_files": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "not": {
+              "pattern": "^/|^[a-zA-Z]:|\\\\|(^|/)\\.\\.(/|$)|//|(^|/)\\.(/|$)|^\\."
+            }
+          },
+          "uniqueItems": true
+        }
+      }
+    },
     "diagnostics": {},
     "type": {
       "type": "string"
     },
-    "tour": {},
+    "tour": {
+      "$ref": "#/$defs/pluginRelpath"
+    },
     "description": {
       "type": "string",
       "description": "Short one-sentence summary of the plugin, surfaced on the v3 Pedalboard Plugins page (clamped to ~2 lines). Optional and additive."
@@ -127,6 +153,13 @@
   },
   "additionalProperties": true,
   "$defs": {
+    "pluginRelpath": {
+      "type": "string",
+      "minLength": 1,
+      "not": {
+        "pattern": "^/|^[a-zA-Z]:|\\\\|(^|/)\\.\\.(/|$)|//|(^|/)\\.(/|$)|^\\.|[?#]"
+      }
+    },
     "domainName": {
       "type": "string",
       "minLength": 1,

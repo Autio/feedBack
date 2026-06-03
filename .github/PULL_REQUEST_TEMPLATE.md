@@ -34,5 +34,5 @@ Thanks for the PR! A few quick reminders before you hit submit:
 
 - [ ] DCO sign-off on every commit (`Signed-off-by:` trailer)
 - [ ] Conventional-commit subject (`feat(scope):`, `fix(scope):`, `docs:`, `chore:`)
-- [ ] `CHANGELOG.md` `[Unreleased]` section updated (skip for chore/docs)
+- [ ] `CHANGELOG.md` `[Unreleased]` section updated
 - [ ] Documentation updated if behaviour or contracts changed
