@@ -568,7 +568,7 @@ test('capability inspector does not render descriptive compatibility shims as co
     assert.doesNotMatch(content, /data-capability-node="command:window\.slopsmithViz_\* factory globals"/);
     assert.doesNotMatch(content, /data-capability-node="command:plugin\.json type: &quot;visualization&quot;"/);
     assert.doesNotMatch(content, /data-link-kind="shimmed"[^>]*>window\.slopsmithViz_\* factory globals<\/span>/);
-    assert.doesNotMatch(content, /data-link-kind="shimmed"[^>]*>plugin\.json type: &quot;visualization&quot;<\/span>/);
+    assert.doesNotMatch(content, /data-link-kind="shimmed"[^>]*>plugin\.json type: (?:&quot;|")visualization(?:&quot;|")<\/span>/);
 });
 
 test('capability inspector clears provider hover without a graph hover target', () => {
