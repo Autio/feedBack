@@ -261,7 +261,7 @@ except OSError:
 # falls through to the config.json fallback.
 _DLC_DIR_ENV = os.environ.get("DLC_DIR", "").strip()
 DLC_DIR = Path(_DLC_DIR_ENV) if _DLC_DIR_ENV else Path("")
-CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", str(Path.home() / ".local" / "share" / "rocksmith-cdlc")))
+CONFIG_DIR = Path(os.environ.get("CONFIG_DIR", str(Path.home() / ".local" / "share" / "feedback")))
 
 # Writable cache directories (use CONFIG_DIR, not STATIC_DIR which may be read-only)
 ART_CACHE_DIR = CONFIG_DIR / "art_cache"
@@ -2926,7 +2926,7 @@ def _make_scan_executor():
     in-process and metadata extraction can be mocked.
     """
     mp_ctx = multiprocessing.get_context("spawn")
-    # Default to one worker per core so CPU-bound AES decryption uses the
+    # Default to one worker per core so CPU-bound metadata parsing uses the
     # whole machine (the point of moving to processes).
     # SLOPSMITH_MAX_SCAN_WORKERS (set by the Desktop launcher to cap memory
     # usage on low-RAM machines — e.g. 8 GB M2 MacBook Air) takes priority;
@@ -3124,19 +3124,6 @@ def _background_scan():
         # path for playback.
         def _is_excluded_from_library(p: Path) -> bool:
             return "tutorials-builtin" in p.parts or "minigames-builtin" in p.parts
-        # Skip RS1 compatibility mega-PSARCs (multi-song, not individually playable)
-        psarcs = [f for f in sorted(dlc.rglob("*.psarc"))
-                  if f.is_file()
-                  and "rs1compatibility" not in f.name.lower()
-                  and not _is_excluded_from_library(f)]
-        # Filter by platform suffix (_p.psarc = PC, _m.psarc = Mac) when the
-        # user's DLC folder contains both variants of every song (e.g. a shared
-        # Steam library between Windows and Mac).
-        _platform = _cfg.get("psarc_platform", "both")
-        if _platform == "pc":
-            psarcs = [f for f in psarcs if not f.stem.endswith("_m")]
-        elif _platform == "mac":
-            psarcs = [f for f in psarcs if not f.stem.endswith("_p")]
         # Sloppaks: match both file (zip) and directory form by suffix.
         sloppaks = [f for f in sorted(dlc.rglob("*.sloppak"))
                     if sloppak_mod.is_sloppak(f)
@@ -3173,9 +3160,9 @@ def _background_scan():
         _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "error", "error": f"Unable to list {dlc}: {e}"}
         return
 
-    all_songs = psarcs + sloppaks + loose_songs
-    log.info("Scan: listed %d PSARCs, %d sloppaks and %d loose folders in %s",
-             len(psarcs), len(sloppaks), len(loose_songs), dlc)
+    all_songs = sloppaks + loose_songs
+    log.info("Scan: listed %d sloppaks and %d loose folders in %s",
+             len(sloppaks), len(loose_songs), dlc)
 
     current_files = {_relpath(f, dlc) for f in all_songs}
 
@@ -3229,8 +3216,8 @@ def _background_scan():
     is_first_scan = bool(all_songs) and len(to_scan) == len(all_songs)
     _scan_status = {**_SCAN_STATUS_INIT, "running": True, "stage": "scanning", "total": len(to_scan),
                     "is_first_scan": is_first_scan}
-    log.info("Library: %d PSARCs + %d sloppaks + %d loose folders, %d cached, %d to scan",
-             len(psarcs), len(sloppaks), len(loose_songs), len(all_songs) - len(to_scan), len(to_scan))
+    log.info("Library: %d sloppaks + %d loose folders, %d cached, %d to scan",
+             len(sloppaks), len(loose_songs), len(all_songs) - len(to_scan), len(to_scan))
 
     with _make_scan_executor() as executor:
         futures = {executor.submit(_scan_one, item): item[0].name for item in to_scan}
@@ -3840,7 +3827,7 @@ def trigger_full_rescan():
 
 # ── Song upload ───────────────────────────────────────────────────────────────
 
-_ALLOWED_SONG_EXTS = {".psarc", ".sloppak"}
+_ALLOWED_SONG_EXTS = {".sloppak"}
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024  # 1 GB — covers sloppaks bundled with stems
 # Per-request batch cap. Lets a user drop a whole album of sloppaks at once
 # without giving a hostile client a 1000-file DoS surface via Starlette's
@@ -3937,7 +3924,7 @@ def _invalidate_song_caches(cache_key: str) -> None:
 
 @app.post("/api/songs/upload")
 async def upload_song(request: Request):
-    """Upload one or more .psarc / .sloppak files into the configured DLC folder.
+    """Upload one or more .sloppak files into the configured DLC folder.
 
     Multipart body with one or more ``file`` fields (up to ``_MAX_UPLOAD_FILES``
     per request). Query string:
@@ -3946,7 +3933,7 @@ async def upload_song(request: Request):
     Response shape (always HTTP 200 once we've gotten past request-level guards
     like DLC-not-configured / payload-too-large):
       ``{"results": [{"filename": "...", "status": "ok" | "exists" | "error",
-                       "error"?: "...", "size"?: N, "format"?: "psarc"}, ...]}``
+                       "error"?: "...", "size"?: N, "format"?: "sloppak"}, ...]}``
     Per-file conflicts surface as ``status: "exists"`` so a batch upload can
     surface ALL conflicts at once instead of bailing on the first one. The
     client re-POSTs just the conflicting files with ``overwrite=1`` if the
@@ -4057,7 +4044,7 @@ async def _save_uploaded_song(upload: UploadFile, dlc: Path, overwrite: bool) ->
     a JSONResponse) so batch uploads can aggregate.
 
     Shape:
-      ok:     ``{"status": "ok", "filename": base, "size": N, "format": "psarc"}``
+      ok:     ``{"status": "ok", "filename": base, "size": N, "format": "sloppak"}``
       exists: ``{"status": "exists", "filename": base, "error": "..."}``
       error:  ``{"status": "error", "filename": base, "error": "..."}``
     """
@@ -4071,7 +4058,7 @@ async def _save_uploaded_song(upload: UploadFile, dlc: Path, overwrite: bool) ->
     suffix = Path(base).suffix.lower()
     if suffix not in _ALLOWED_SONG_EXTS:
         return {"status": "error", "filename": base,
-                "error": "Only .psarc and .sloppak files are accepted"}
+                "error": "Only .sloppak files are accepted"}
 
     dest = dlc / base
     if dest.exists():
@@ -4090,7 +4077,7 @@ async def _save_uploaded_song(upload: UploadFile, dlc: Path, overwrite: bool) ->
                              "refusing to overwrite"}
 
     # Temp file in the DLC dir itself so os.replace is atomic (same filesystem).
-    # Dot-prefix keeps it out of the rglob("*.psarc")/"*.sloppak") scan globs.
+    # Dot-prefix keeps it out of the rglob("*.sloppak") scan glob.
     fd, tmp_name = await run_in_threadpool(
         tempfile.mkstemp, dir=str(dlc), prefix=".upload-", suffix=".part"
     )
@@ -4129,9 +4116,6 @@ async def _save_uploaded_song(upload: UploadFile, dlc: Path, overwrite: bool) ->
             if bytes_read == 0:
                 error_result = {"status": "error", "filename": base,
                                 "error": "Empty upload — file is 0 bytes"}
-            elif suffix == ".psarc" and head[:4] != b"PSAR":
-                error_result = {"status": "error", "filename": base,
-                                "error": "Not a valid PSARC file (wrong magic bytes)"}
             elif suffix == ".sloppak":
                 if head[:2] != b"PK":
                     error_result = {"status": "error", "filename": base,
@@ -4183,10 +4167,10 @@ async def _save_uploaded_song(upload: UploadFile, dlc: Path, overwrite: bool) ->
 def delete_song(filename: str):
     """Remove a song from the DLC folder and clear its cache entries.
 
-    Works for all three formats: ``.psarc`` files, ``.sloppak`` files
-    OR directories, and loose-folder songs (the directory containing the
-    chart). The path is resolved through ``_resolve_dlc_path`` so URL-encoded
-    ``..`` segments cannot escape the library root.
+    Works for both formats: ``.sloppak`` files OR directories, and
+    loose-folder songs (the directory containing the chart). The path is
+    resolved through ``_resolve_dlc_path`` so URL-encoded ``..`` segments
+    cannot escape the library root.
     """
     dlc = _get_dlc_dir()
     if dlc is None:
@@ -4203,16 +4187,15 @@ def delete_song(filename: str):
     # would recursively wipe a whole artist subfolder — far broader than the
     # UI's per-song contract. Sloppak detection wins over loose because a
     # sloppak dir can also contain WEM/XML (matches the scanner's precedence).
-    is_psarc = resolved.is_file() and resolved.suffix.lower() == ".psarc"
     is_sloppak = sloppak_mod.is_sloppak(resolved)
     is_loose = (
         resolved.is_dir()
         and not is_sloppak
         and loosefolder_mod.is_loose_song(resolved)
     )
-    if not (is_psarc or is_sloppak or is_loose):
+    if not (is_sloppak or is_loose):
         return JSONResponse(
-            {"error": "Not a song entry — only PSARC files, sloppaks, "
+            {"error": "Not a song entry — only sloppaks "
                       "or loose-folder songs can be deleted"},
             status_code=400,
         )
@@ -5261,7 +5244,6 @@ def _default_settings():
     # silently undoing the env-var fix on the next load.
     return {
         "dlc_dir": str(DLC_DIR) if (_DLC_DIR_ENV and DLC_DIR.is_dir()) else "",
-        "psarc_platform": "both",
     }
 
 
@@ -5310,7 +5292,7 @@ def save_settings(data: dict):
     # clobber unrelated settings on disk.
     #
     # Validation runs FIRST, outside _settings_lock. The dlc_dir branch
-    # stats the folder and counts .psarc files, which can be slow on a
+    # stats the folder and counts sloppak files, which can be slow on a
     # large or networked DLC dir — holding the lock across it would block
     # every other settings writer (dropdown/slider autosaves, imports).
     # So validation only resolves `updates` (the keys to merge); the
@@ -5333,8 +5315,8 @@ def save_settings(data: dict):
         else:
             if Path(dlc_path).is_dir():
                 updates["dlc_dir"] = dlc_path
-                count = sum(1 for f in Path(dlc_path).iterdir() if f.suffix == ".psarc")
-                messages.append(f"DLC folder: {count} .psarc files found")
+                count = sum(1 for f in Path(dlc_path).iterdir() if f.suffix == ".sloppak")
+                messages.append(f"DLC folder: {count} sloppak files found")
             else:
                 return {"error": f"DLC directory not found: {dlc_path}"}
 
@@ -5386,16 +5368,6 @@ def save_settings(data: dict):
             updates["av_offset_ms"] = max(-1000.0, min(1000.0, float(raw)))
         except (TypeError, ValueError, OverflowError):
             return {"error": "av_offset_ms must be a number between -1000 and 1000"}
-
-    if "psarc_platform" in data:
-        raw = data["psarc_platform"]
-        # null is a no-op (preserves on-disk value), matching the
-        # dlc_dir / default_arrangement contract. Non-string and
-        # out-of-range strings are rejected with a structured error.
-        if raw is not None:
-            if not isinstance(raw, str) or raw not in ("both", "pc", "mac"):
-                return {"error": "psarc_platform must be 'both', 'pc', or 'mac'"}
-            updates["psarc_platform"] = raw
 
     # fee[dB]ack v0.3.0 — tuner reference pitch + instrument selection.
     # These drive the topbar tuner/instrument badges and (when installed) the
@@ -5529,10 +5501,6 @@ def _validate_server_config_types(cfg: dict) -> str | None:
             return "server_config.av_offset_ms must be a number between -1000 and 1000"
         if not (-1000 <= v <= 1000):
             return "server_config.av_offset_ms must be between -1000 and 1000"
-    if "psarc_platform" in cfg:
-        v = cfg["psarc_platform"]
-        if v is not None and v not in ("both", "pc", "mac"):
-            return "server_config.psarc_platform must be 'both', 'pc', or 'mac'"
     # fee[dB]ack v0.3.0 tuner/instrument keys — keep in sync with POST /api/settings.
     if "reference_pitch" in cfg:
         v = cfg["reference_pitch"]
