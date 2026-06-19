@@ -192,7 +192,7 @@
             // Step 3 — calibration offer (first-run only).
             '<div id="v3-ob-step3" class="hidden">' +
             '<label class="block text-xs uppercase tracking-wider text-fb-textDim mb-2">Calibration challenge</label>' +
-            '<p class="text-sm text-fb-textDim">Prove your setup: play the <span class="text-fb-text">Slopsmith Diagnostic</span> with note detection and finish at <span class="text-fb-text font-semibold">100% accuracy</span> to reach <span class="text-fb-text font-semibold">Mastery Rank 1</span>.</p>' +
+            '<p class="text-sm text-fb-textDim">Prove your setup: play the <span class="text-fb-text">fee[dB]ack Diagnostic</span> with note detection and finish at <span class="text-fb-text font-semibold">100% accuracy</span> to reach <span class="text-fb-text font-semibold">Mastery Rank 1</span>.</p>' +
             '<p class="text-sm text-fb-textDim mt-2">Not ready? Skip it and you’ll start at Rank 1 anyway — you can still play it later from the Progress screen.</p></div>' +
             '<p id="v3-ob-error" class="text-sm text-fb-accent hidden"></p>' +
             '<div class="flex justify-end gap-3">' +
