@@ -33,8 +33,25 @@
         { key: 'lessons',    screen: 'v3-lessons',       label: 'Lessons',         group: 'LIBRARY', icon: 'lessons' },
         { key: 'favorites',  screen: 'favorites',        label: 'Favorites',       group: 'LIBRARY', icon: 'star' },
         { key: 'saved',      screen: 'v3-saved',         label: 'Saved for Later', group: 'LIBRARY', icon: 'bookmark' },
+        // Promoted plugins (group: null) — bundled plugins given their own
+        // first-class sidebar entry instead of the generic plugin gallery. They
+        // are placed by PROMOTED_PLUGINS below and their slots are filled by
+        // renderPromotedNav() only when the plugin is actually installed. All
+        // other plugins are reached solely via the single "Plugins" entry
+        // above. Screens are injected async by the plugin loader, so go()'s
+        // plugin- guard applies.
+        { key: 'slopscale',   screen: 'plugin-slopscale',   label: 'SlopScale - Practice', group: null, icon: 'target' },
+        { key: 'rig_builder', screen: 'plugin-rig_builder', label: 'Rig Builder', group: null,      icon: 'amp' },
         // Not in the sidebar groups, but routable (profile badge → here).
         { key: 'profile',   screen: 'v3-profile',   label: 'Profile',         group: null,      icon: 'user' },
+    ];
+    // Bundled plugins promoted to dedicated sidebar entries. `anchorAfter` is
+    // the nav key the slot is rendered immediately below (within that key's
+    // group); a key that's the last item of the last group lands right after
+    // that group. Each is gated on the plugin actually being installed.
+    const PROMOTED_PLUGINS = [
+        { navKey: 'slopscale',   pluginId: 'slopscale',   slotId: 'v3-nav-slopscale',    anchorAfter: 'feedbarcade' },
+        { navKey: 'rig_builder', pluginId: 'rig_builder', slotId: 'v3-nav-rig-builder', anchorAfter: 'saved' },
     ];
     const TOPBAR_KEYS = ['home', 'songs', 'plugins', 'settings'];
     const SIDEBAR_GROUPS = ['HOME', 'LIBRARY'];
@@ -53,6 +70,8 @@
         lessons: 'M12 4L2 9l10 5 10-5-10-5zM6 11.5V16c0 1 2.7 2.5 6 2.5s6-1.5 6-2.5v-4.5',
         trophy: 'M8 21h8m-4-4v4m-6-17h12v5a6 6 0 01-12 0V4zm12 2h2a2 2 0 01-2 4M6 6H4a2 2 0 002 4',
         tag: 'M20.6 13.4l-7.2 7.2a2 2 0 01-2.8 0l-7-7V4h9.6l7.4 7.4a2 2 0 010 2zM7.5 7.5h.01',
+        amp: 'M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1zm11 4a3 3 0 100 6 3 3 0 000-6zM6.5 8.5h.01M9 8.5h.01',
+        target: 'M12 3a9 9 0 100 18 9 9 0 000-18zm0 4a5 5 0 100 10 5 5 0 000-10zm0 4a1 1 0 100 2 1 1 0 000-2z',
     };
     function iconSvg(name) {
         const d = ICONS[name] || ICONS.disc;
@@ -114,12 +133,19 @@
     }
 
     // ── Sidebar ───────────────────────────────────────────────────────────--
-    function navItemHTML(entry) {
+    function navItemHTML(entry, labelOverride) {
         return '<a href="#/' + entry.key + '" data-v3-nav="' + entry.key + '" ' +
             'class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-fb-textDim ' +
             'hover:text-fb-text hover:bg-fb-card/50 transition-colors">' +
-            iconSvg(entry.icon) + '<span>' + entry.label + '</span></a>';
+            iconSvg(entry.icon) + '<span class="truncate">' + esc(labelOverride != null ? labelOverride : entry.label) + '</span></a>';
     }
+    // Empty slot for a promoted plugin, anchored after a nav item. Filled by
+    // renderPromotedNav() only when the plugin is installed, so an absent
+    // bundle shows nothing rather than a dead entry that bounces to Plugins.
+    const promotedSlotHTML = (key) => PROMOTED_PLUGINS
+        .filter((p) => p.anchorAfter === key)
+        .map((p) => '<div id="' + p.slotId + '"></div>')
+        .join('');
     function renderSidebar() {
         const nav = document.getElementById('v3-nav');
         if (!nav) return;
@@ -127,11 +153,10 @@
         for (const group of SIDEBAR_GROUPS) {
             const items = NAV.filter((n) => n.group === group);
             if (!items.length) continue;
+            const itemsHTML = items.map((it) => navItemHTML(it) + promotedSlotHTML(it.key)).join('');
             html += '<div><div class="px-3 mb-1 text-[10px] uppercase tracking-wider font-semibold text-fb-textDim/70">' +
-                group + '</div><div class="space-y-0.5">' + items.map(navItemHTML).join('') + '</div></div>';
+                group + '</div><div class="space-y-0.5">' + itemsHTML + '</div></div>';
         }
-        // Plugins group is appended later by renderPluginNav().
-        html += '<div id="v3-nav-plugins"></div>';
         nav.innerHTML = html;
         nav.querySelectorAll('a[data-v3-nav]').forEach((a) => {
             a.addEventListener('click', (e) => {
@@ -223,32 +248,31 @@
         if (bd) bd.classList.add('hidden');
     }
 
-    // ── Plugin nav (legacy loader is the source; UI domain is deferred) ──────
-    async function renderPluginNav() {
-        const host = document.getElementById('v3-nav-plugins');
-        if (!host) return;
+    // ── Promoted-plugin nav (legacy loader is the source; UI domain deferred) ─
+    // Individual plugins are NOT listed in the sidebar — the single "Plugins"
+    // entry (HOME group) is the one entry point to the plugin gallery. The
+    // PROMOTED_PLUGINS get their own first-class slots, each filled here only
+    // when that plugin is actually installed.
+    async function renderPromotedNav() {
         let plugins = [];
         try {
             const res = await fetch('/api/plugins');
             if (res.ok) plugins = await res.json();
-        } catch (e) { return; } // degrade: no plugin group
-        const withNav = (Array.isArray(plugins) ? plugins : []).filter((p) => p && p.nav && (p.nav.label || p.name));
-        if (!withNav.length) return;
-        let html = '<div class="px-3 mt-2 mb-1 text-[10px] uppercase tracking-wider font-semibold text-fb-textDim/70">PLUGINS</div><div class="space-y-0.5">';
-        for (const p of withNav) {
-            const label = (p.nav && p.nav.label) || p.name || p.id;
-            html += '<a href="#" data-v3-plugin="' + esc(p.id) + '" ' +
-                'class="flex items-center gap-3 px-3 py-2 rounded-lg text-sm text-fb-textDim hover:text-fb-text hover:bg-fb-card/50 transition-colors">' +
-                iconSvg('plug') + '<span class="truncate">' + esc(label) + '</span></a>';
+        } catch (e) { return; } // degrade: no promoted slots
+        const list = Array.isArray(plugins) ? plugins : [];
+        for (const promo of PROMOTED_PLUGINS) {
+            const host = document.getElementById(promo.slotId);
+            const entry = byKey(promo.navKey);
+            if (!host || !entry) continue;
+            const plugin = list.find((p) => p && p.id === promo.pluginId);
+            if (!plugin) continue; // not installed → empty slot
+            // Use the plugin's own nav label (manifest), falling back to the
+            // static NAV label. navItemHTML escapes it.
+            const label = (plugin.nav && plugin.nav.label) || plugin.name || entry.label;
+            host.innerHTML = '<div class="space-y-0.5">' + navItemHTML(entry, label) + '</div>';
+            const a = host.querySelector('a[data-v3-nav]');
+            if (a) a.addEventListener('click', (e) => { e.preventDefault(); go(entry.screen); });
         }
-        html += '</div>';
-        host.innerHTML = html;
-        host.querySelectorAll('a[data-v3-plugin]').forEach((a) => {
-            a.addEventListener('click', (e) => {
-                e.preventDefault();
-                go('plugin-' + a.getAttribute('data-v3-plugin'));
-            });
-        });
     }
 
     // ── showScreen wrapper (idempotent rehydration — design/05 §Rehydration) ─
@@ -276,7 +300,7 @@
         renderTopbar();
         ensureBackdrop();
         installShowScreenHook();
-        renderPluginNav(); // async, non-blocking
+        renderPromotedNav(); // async, non-blocking
 
         // First-run gate: onboarding overlay is owned by prompt 15. Until it
         // exists, degrade gracefully and go straight to the dashboard.
