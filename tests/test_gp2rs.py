@@ -20,9 +20,11 @@ import pytest
 from gp2rs import (
     GP_TICKS_PER_QUARTER,
     TempoEvent,
+    _bend_intent_from_values,
     _build_playback_schedule,
     _compute_tuning,
     _extract_year,
+    _gp_bend_shape,
     _gp_string_to_rs,
     _is_bass_track,
     _standard_tuning_for,
@@ -795,12 +797,14 @@ def _ct_note(note_type, gp_string, fret):
     )
 
 
-def _ct_song(beats):
-    """One-measure mock song for convert_track, standard 6-string guitar at 120 BPM."""
+def _ct_song(beats, string_values=None):
+    """One-measure mock song for convert_track, standard 6-string guitar at 120 BPM.
+
+    `string_values` overrides the tuning/string count (e.g. a 7-string track)."""
     voice = SimpleNamespace(beats=beats)
     measure = SimpleNamespace(voices=[voice])
     strings = [SimpleNamespace(number=i + 1, value=v)
-               for i, v in enumerate([64, 59, 55, 50, 45, 40])]
+               for i, v in enumerate(string_values or [64, 59, 55, 50, 45, 40])]
     track = SimpleNamespace(
         strings=strings,
         channel=SimpleNamespace(instrument=24),
@@ -860,6 +864,80 @@ def test_tied_note_without_predecessor_is_silently_dropped():
     root = ET.fromstring(xml_str)  # noqa: S314
     notes = root.findall(".//notes/note")
     assert len(notes) == 0
+
+
+# ── convert_track: bend shape (bn / bt / bnv, §6.2.1) ────────────────────────
+
+def _ct_bend(points):
+    """A pyguitarpro-shaped BendEffect: points are (position 0..12, value)
+    pairs where value is half-quarter-tone units (12 = 6 semitones)."""
+    return SimpleNamespace(
+        points=[SimpleNamespace(position=p, value=v) for p, v in points],
+    )
+
+
+def test_bend_intent_classifier():
+    assert _bend_intent_from_values([0.0, 1.0, 2.0]) == 0       # up
+    assert _bend_intent_from_values([2.0, 1.0, 0.0]) == 3       # pre-bend+release
+    assert _bend_intent_from_values([2.0, 2.0]) == 2            # pre-bend held
+    assert _bend_intent_from_values([2.0, 1.0]) == 1            # release (let down)
+    assert _bend_intent_from_values([0.0, 2.0, 0.0]) == 4       # round-trip
+    assert _bend_intent_from_values([]) == 0
+
+
+def test_gp_bend_shape_units_and_time():
+    """value/2 = semitones; position/12 * duration = seconds-from-onset."""
+    # 0.5 s note, up-bend 0 → value 4 (2 semitones) at the end.
+    peak, intent, curve = _gp_bend_shape(_ct_bend([(0, 0), (12, 4)]), 0.5)
+    assert peak == 2.0
+    assert intent == 0
+    assert curve == [{"t": 0.0, "v": 0.0}, {"t": 0.5, "v": 2.0}]
+    # Zero-length note collapses every point to t=0 → no usable curve.
+    _, _, curve0 = _gp_bend_shape(_ct_bend([(0, 0), (12, 4)]), 0.0)
+    assert curve0 is None
+    # A single point carries only the peak, no curve.
+    _, _, curve1 = _gp_bend_shape(_ct_bend([(6, 4)]), 0.5)
+    assert curve1 is None
+
+
+def test_bent_note_imports_with_curve_through_wire():
+    """A GP up-bend imports with bn (peak) + bt + bnv, and survives
+    convert_track XML → _parse_note → note_to_wire."""
+    from song import _parse_note, note_to_wire
+    note = _ct_note(guitarpro.NoteType.normal, gp_string=1, fret=7)
+    # quarter @ 120 BPM = 0.5 s; round-trip bend 0 → 2 → 0 semitones.
+    note.effect.bend = _ct_bend([(0, 0), (6, 4), (12, 0)])
+    beat = _ct_beat(tick=0, dur_value=4, notes=[note])
+
+    root = ET.fromstring(convert_track(_ct_song([beat]), track_index=0))  # noqa: S314
+    xn = root.findall(".//notes/note")[0]
+    assert xn.get("bend") == "2.0"
+    assert xn.get("bendIntent") == "4"        # round-trip
+    import json
+    assert json.loads(xn.get("bendValues")) == [
+        {"t": 0.0, "v": 0.0}, {"t": 0.25, "v": 2.0}, {"t": 0.5, "v": 0.0}]
+
+    wire = note_to_wire(_parse_note(xn))
+    assert wire["bn"] == 2.0
+    assert wire["bt"] == 4
+    assert wire["bnv"] == [
+        {"t": 0.0, "v": 0.0}, {"t": 0.25, "v": 2.0}, {"t": 0.5, "v": 0.0}]
+
+
+def test_non_bent_note_has_no_curve():
+    note = _ct_note(guitarpro.NoteType.normal, gp_string=1, fret=5)  # bend=None
+    beat = _ct_beat(tick=0, dur_value=4, notes=[note])
+    root = ET.fromstring(convert_track(_ct_song([beat]), track_index=0))  # noqa: S314
+    xn = root.findall(".//notes/note")[0]
+    assert xn.get("bend") == "0"
+    assert xn.get("bendIntent") is None
+    assert xn.get("bendValues") is None
+
+    from song import _parse_note
+    n = _parse_note(xn)
+    assert n.bend == 0.0
+    assert n.bend_intent == 0
+    assert n.bend_values is None
 
 
 def _ct_multivoice_song(voices_beats):
@@ -1100,3 +1178,183 @@ def test_tie_not_extended_across_repeat_boundary():
         assert sustain == pytest.approx(0.5, abs=0.01), (
             f"sustain should be ~0.5 s (one quarter note), got {sustain:.3f}"
         )
+
+
+# ── convert_track: GP5 chord-diagram fingering extraction (E3) ───────────────
+# pyguitarpro exposes the chord-diagram voicing on beat.effect.chord:
+# .strings is per-string frets indexed 0 = highest string, .fingerings is the
+# parallel Fingering enum list (open=-1, thumb=0, index=1, middle=2, ring=3,
+# pinky=4 — already the RS finger integers). A chord beat carrying this data
+# must import with per-string fingers; a chord beat without it stays all -1.
+
+def _ct_chord(name, strings, fingerings):
+    return SimpleNamespace(
+        name=name, strings=list(strings),
+        fingerings=list(fingerings), length=len(strings),
+    )
+
+
+def test_chord_diagram_fingers_extracted():
+    # Two-note voicing on high e (fret 3) + B (fret 2). chord.strings is
+    # indexed 0 = highest string, so strings[0] = high e, strings[1] = B.
+    note_e = _ct_note(guitarpro.NoteType.normal, gp_string=1, fret=3)  # high e
+    note_b = _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=2)  # B
+    beat = _ct_beat(tick=0, dur_value=4, notes=[note_e, note_b])
+    beat.effect.chord = _ct_chord(
+        "Gtest",
+        strings=[3, 2, -1, -1, -1, -1],
+        fingerings=[
+            guitarpro.Fingering.middle,  # high e -> 2
+            guitarpro.Fingering.index,   # B      -> 1
+        ],
+    )
+
+    xml_str = convert_track(_ct_song([beat]), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    ct = root.find(".//chordTemplates/chordTemplate")
+    assert ct is not None
+    assert ct.get("chordName") == "Gtest"
+    # _gp_string_to_rs(1, 6) = 5 (high e), _gp_string_to_rs(2, 6) = 4 (B).
+    assert ct.get("fret5") == "3" and ct.get("finger5") == "2"
+    assert ct.get("fret4") == "2" and ct.get("finger4") == "1"
+    assert [ct.get(f"finger{i}") for i in range(0, 4)] == ["-1"] * 4
+
+
+def test_chord_without_diagram_has_blank_fingers():
+    # A plain two-note chord (effect.chord is None) is unchanged: blank name,
+    # all-(-1) fingers — no regression for diagram-less charts.
+    note_e = _ct_note(guitarpro.NoteType.normal, gp_string=1, fret=3)
+    note_b = _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=2)
+    beat = _ct_beat(tick=0, dur_value=4, notes=[note_e, note_b])  # chord=None
+
+    xml_str = convert_track(_ct_song([beat]), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    ct = root.find(".//chordTemplates/chordTemplate")
+    assert ct is not None
+    assert ct.get("chordName") == ""
+    assert [ct.get(f"finger{i}") for i in range(6)] == ["-1"] * 6
+
+
+def test_chord_diagram_backfills_template_first_strummed_unannotated():
+    # The annotated chord must enrich its voicing even when an earlier,
+    # unannotated beat of the SAME fret pattern created the template first.
+    plain = _ct_beat(
+        tick=0, dur_value=4,
+        notes=[_ct_note(guitarpro.NoteType.normal, gp_string=1, fret=3),
+               _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=2)],
+    )  # chord=None, creates the blank template
+    annotated = _ct_beat(
+        tick=GP_TICKS_PER_QUARTER, dur_value=4,
+        notes=[_ct_note(guitarpro.NoteType.normal, gp_string=1, fret=3),
+               _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=2)],
+    )
+    annotated.effect.chord = _ct_chord(
+        "Gtest", strings=[3, 2, -1, -1, -1, -1],
+        fingerings=[guitarpro.Fingering.middle, guitarpro.Fingering.index],
+    )
+
+    xml_str = convert_track(_ct_song([plain, annotated]), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    cts = root.findall(".//chordTemplates/chordTemplate")
+    assert len(cts) == 1, "same voicing must dedup to one template"
+    assert cts[0].get("chordName") == "Gtest"
+    assert cts[0].get("finger5") == "2" and cts[0].get("finger4") == "1"
+
+
+def test_chord_diagram_mismatch_not_applied():
+    # The attached diagram describes a DIFFERENT voicing (frets 5/5) than the
+    # notes actually played (3/2). It must NOT enrich the played template —
+    # otherwise a mislabeled chord would name/finger the wrong voicing (and the
+    # back-fill would spread it). Name + fingers stay blank.
+    note_e = _ct_note(guitarpro.NoteType.normal, gp_string=1, fret=3)
+    note_b = _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=2)
+    beat = _ct_beat(tick=0, dur_value=4, notes=[note_e, note_b])
+    beat.effect.chord = _ct_chord(
+        "Wrong", strings=[5, 5, -1, -1, -1, -1],  # != played 3/2
+        fingerings=[guitarpro.Fingering.annular, guitarpro.Fingering.annular],
+    )
+
+    xml_str = convert_track(_ct_song([beat]), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    ct = root.find(".//chordTemplates/chordTemplate")
+    assert ct is not None
+    assert ct.get("chordName") == ""
+    assert [ct.get(f"finger{i}") for i in range(6)] == ["-1"] * 6
+
+
+def test_chord_diagram_name_then_fingers_decoupled():
+    # First annotated beat carries a NAME but no fingers (all open); a later beat
+    # of the same voicing carries the fingers. Both must land — a name-only first
+    # annotation must not block the later fingers (name/fingers back-fill
+    # independently).
+    def _beat(tick, name, fingerings):
+        b = _ct_beat(
+            tick=tick, dur_value=4,
+            notes=[_ct_note(guitarpro.NoteType.normal, gp_string=1, fret=3),
+                   _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=2)],
+        )
+        b.effect.chord = _ct_chord(name, strings=[3, 2, -1, -1, -1, -1],
+                                   fingerings=fingerings)
+        return b
+
+    first = _beat(0, "Gtest",
+                  [guitarpro.Fingering.open, guitarpro.Fingering.open])
+    second = _beat(GP_TICKS_PER_QUARTER, "",
+                   [guitarpro.Fingering.middle, guitarpro.Fingering.index])
+
+    xml_str = convert_track(_ct_song([first, second]), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    cts = root.findall(".//chordTemplates/chordTemplate")
+    assert len(cts) == 1
+    assert cts[0].get("chordName") == "Gtest"  # from the first (name-only) beat
+    # fingers from the second beat — not blocked by the first beat's name
+    assert cts[0].get("finger5") == "2" and cts[0].get("finger4") == "1"
+
+
+def test_chord_diagram_barre_higher_position_matches():
+    # A voicing high on the neck: diagram strings hold ABSOLUTE frets (firstFret
+    # is display-only), so they match the played absolute frets and the template
+    # enriches. Guards against an absolute-vs-relative matching regression.
+    notes = [_ct_note(guitarpro.NoteType.normal, gp_string=1, fret=5),
+             _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=5),
+             _ct_note(guitarpro.NoteType.normal, gp_string=3, fret=6)]
+    beat = _ct_beat(tick=0, dur_value=4, notes=notes)
+    ch = _ct_chord("A", strings=[5, 5, 6, -1, -1, -1],
+                   fingerings=[guitarpro.Fingering.index, guitarpro.Fingering.index,
+                               guitarpro.Fingering.middle])
+    ch.firstFret = 5  # display base — must not affect matching
+    beat.effect.chord = ch
+
+    xml_str = convert_track(_ct_song([beat]), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    ct = root.find(".//chordTemplates/chordTemplate")
+    assert ct is not None
+    assert ct.get("chordName") == "A"
+    assert ct.get("fret5") == "5" and ct.get("finger5") == "1"
+    assert ct.get("fret4") == "5" and ct.get("finger4") == "1"
+    assert ct.get("fret3") == "6" and ct.get("finger3") == "2"
+
+
+def test_chord_diagram_extended_string_outside_played_width_not_applied():
+    # 7-string track. Played voicing is on strings 2 & 3 only (width 6 — the
+    # high e / rs6 is unused), but the diagram ALSO frets string 1 (the extended
+    # rs6). The extra diagram note must make this a MISMATCH, not be silently
+    # trimmed to a false match — so the played template stays un-enriched.
+    seven = [64, 59, 55, 50, 45, 40, 35]  # low-B 7-string
+    note_b = _ct_note(guitarpro.NoteType.normal, gp_string=2, fret=3)  # rs5
+    note_g = _ct_note(guitarpro.NoteType.normal, gp_string=3, fret=2)  # rs4
+    beat = _ct_beat(tick=0, dur_value=4, notes=[note_b, note_g])
+    # diagram index0 = gp_string1 (rs6) frets 5 (NOT played); index1/2 match.
+    beat.effect.chord = _ct_chord(
+        "Bogus", strings=[5, 3, 2, -1, -1, -1, -1],
+        fingerings=[guitarpro.Fingering.index, guitarpro.Fingering.middle,
+                    guitarpro.Fingering.index],
+    )
+
+    xml_str = convert_track(_ct_song([beat], string_values=seven), track_index=0)
+    root = ET.fromstring(xml_str)  # noqa: S314
+    ct = root.find(".//chordTemplates/chordTemplate")
+    assert ct is not None
+    assert ct.get("chordName") == ""
+    # played template is width 6 (rs6/high-e unused) -> finger0..finger5
+    assert all(ct.get(f"finger{i}") == "-1" for i in range(6))

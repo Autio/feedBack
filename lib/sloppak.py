@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import threading
 import zipfile
@@ -31,6 +32,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 log = logging.getLogger("slopsmith.lib.sloppak")
+
+# The feedpak format version this build targets / writes (manifest
+# `feedpak_version`, a semver string per spec §4). Readers tolerate any version
+# (additive/MINOR compatibility); writers stamp this.
+FEEDPAK_VERSION = "1.2.0"
 
 import yaml
 
@@ -42,6 +48,7 @@ from song import (
     Arrangement,
     arrangement_from_wire,
     _finite_float,
+    sanitize_tempos,
 )
 import drums as drums_mod
 import notation as notation_mod
@@ -81,6 +88,27 @@ def is_sloppak(path: Path) -> bool:
 # For zipped sloppaks, source_dir is a cache dir under the unpack root.
 _source_cache: dict[str, tuple[Path, float, int]] = {}
 _source_lock = threading.Lock()
+
+# Full-archive unpacks (zip form) are expensive — they write every stem to
+# disk. Cap how many run at once so a burst (e.g. many plays queued, or a stray
+# caller looping the library) can't saturate disk/CPU, and serialize per-file so
+# two callers never rmtree + re-extract the same dest simultaneously (which
+# would corrupt the half-written dir the other is reading).
+_UNPACK_MAX_CONCURRENCY = 2
+_unpack_semaphore = threading.BoundedSemaphore(_UNPACK_MAX_CONCURRENCY)
+_unpack_locks: dict[str, threading.Lock] = {}
+_unpack_locks_guard = threading.Lock()
+
+
+def _unpack_lock_for(filename: str) -> threading.Lock:
+    """Return a stable per-file lock so concurrent unpacks of the same sloppak
+    serialize instead of racing on the same destination dir."""
+    with _unpack_locks_guard:
+        lk = _unpack_locks.get(filename)
+        if lk is None:
+            lk = threading.Lock()
+            _unpack_locks[filename] = lk
+        return lk
 
 
 def _unpack_zip(zip_path: Path, dest: Path) -> None:
@@ -154,10 +182,26 @@ def resolve_source_dir(
     if path.is_dir():
         resolved = path
     else:
-        # Zip form — unpack to the cache.
+        # Zip form — unpack to the cache. Serialize per-file (so concurrent
+        # callers don't rmtree + re-extract the same dest at once) and cap
+        # global unpack concurrency (so a burst can't saturate disk/CPU).
         dest = unpack_cache_root / _safe_id(filename)
-        _unpack_zip(path, dest)
-        resolved = dest
+        with _unpack_lock_for(filename):
+            # Re-check the cache inside the per-file lock — a prior holder may
+            # have just finished unpacking this exact (mtime, size).
+            with _source_lock:
+                cached = _source_cache.get(filename)
+            if (
+                cached
+                and cached[1] == mtime
+                and cached[2] == size
+                and cached[0].exists()
+            ):
+                resolved = cached[0]
+            else:
+                with _unpack_semaphore:
+                    _unpack_zip(path, dest)
+                resolved = dest
 
     with _source_lock:
         _source_cache[filename] = (resolved, mtime, size)
@@ -224,6 +268,97 @@ def read_feedpak_version(manifest: dict) -> str | None:
     return None
 
 
+_COVER_MEDIA_TYPES = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".webp": "image/webp",
+}
+
+
+def _cover_media_type(name: str) -> str:
+    return _COVER_MEDIA_TYPES.get(Path(name).suffix.lower(), "image/jpeg")
+
+
+def read_cover_bytes(
+    path: Path, manifest: dict | None = None
+) -> tuple[bytes, str] | None:
+    """Return ``(image_bytes, media_type)`` for a sloppak's cover, or ``None``.
+
+    Reads ONLY the cover image. For a zipped sloppak this opens the single
+    cover member rather than unpacking the whole archive (stems included), so
+    serving album art on the library grid never triggers a full extraction —
+    the dominant cost behind slow cover loading on scroll.
+    """
+    try:
+        if manifest is None:
+            manifest = load_manifest(path)
+    except Exception:
+        manifest = {}
+    cover_rel = str((manifest or {}).get("cover") or "cover.jpg")
+
+    if path.is_dir():
+        # Directory form — read the file, guarding against escape.
+        cover_path = (path / cover_rel).resolve()
+        try:
+            cover_path.relative_to(path.resolve())
+        except ValueError:
+            return None
+        if cover_path.is_file():
+            try:
+                return cover_path.read_bytes(), _cover_media_type(cover_path.name)
+            except OSError as e:
+                log.warning("sloppak: failed to read cover %r: %s", cover_path, e)
+        return None
+
+    # Zip form — read just the cover member, no unpack. Normalize the manifest
+    # name the way the filesystem would (collapse './' and 'a/../b', backslash →
+    # slash) so a non-canonical-but-valid cover like './cover.jpg' still resolves
+    # to the archive member 'cover.jpg' — matching the old unpack-then-resolve
+    # behavior — and reject zip-slip escape before opening.
+    _zip_root = Path("/_root").resolve()
+    safe = safe_join(_zip_root, cover_rel)
+    # `safe is None` → escape; `safe == _zip_root` → a degenerate name like "."
+    # or "subdir/.." that collapses to the root (member would be "."). Reject
+    # both, mirroring _unpack_zip's degenerate-root guard.
+    if safe is None or safe == _zip_root:
+        log.warning("sloppak: rejected unsafe cover name %r in %r", cover_rel, path)
+        return None
+    member = safe.relative_to(_zip_root).as_posix()
+    try:
+        with zipfile.ZipFile(str(path), "r") as zf:
+            try:
+                data = zf.read(member)
+            except KeyError:
+                return None
+        return data, _cover_media_type(member)
+    except (OSError, zipfile.BadZipFile, RuntimeError) as e:
+        log.warning("sloppak: failed to read cover from zip %r: %s", path, e)
+        return None
+
+
+def _sanitize_time_signatures(events) -> list[dict]:
+    """Clean a time-signature event list (``[{time, ts:[num, den]}]``): keep
+    entries with a finite non-bool ``time`` and a ``ts`` of two integers >= 1,
+    sorted by time. Non-list / all-invalid input -> ``[]``."""
+    out: list[dict] = []
+    if isinstance(events, list):
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            t = ev.get("time")
+            ts = ev.get("ts")
+            if (not isinstance(t, (int, float)) or isinstance(t, bool)
+                    or not math.isfinite(t)):
+                continue
+            if not isinstance(ts, list) or len(ts) != 2:
+                continue
+            if not all(isinstance(x, int) and not isinstance(x, bool) and x >= 1
+                       for x in ts):
+                continue
+            out.append({"time": float(t), "ts": [int(ts[0]), int(ts[1])]})
+        out.sort(key=lambda e: e["time"])
+    return out
+
+
 @dataclass
 class LoadedSloppak:
     """Result of loading a sloppak: the Song object plus stem descriptors."""
@@ -231,6 +366,9 @@ class LoadedSloppak:
     stems: list[dict]           # [{"id": str, "file": str, "default": bool}]
     source_dir: Path
     manifest: dict
+    # The pack's declared format version (manifest `feedpak_version`, a semver
+    # string per spec §4). None when absent (legacy / pre-versioning packs).
+    feedpak_version: str | None = None
     # Parsed `drum_tab.json` payload when the manifest carries a `drum_tab:`
     # key pointing at a readable, schema-valid file. None otherwise (older
     # sloppaks, sloppaks without drums, sloppaks whose drum tab failed to
@@ -242,6 +380,18 @@ class LoadedSloppak:
     # When present, its beats/sections take priority over any beats/sections
     # embedded in the arrangement JSONs.
     song_timeline: dict | None = None
+    # Parsed `keys.json` payload (manifest `keys:` key) — a song-level,
+    # instrument-independent key/scale-change track (spec §7.7). None when
+    # absent / unreadable / malformed. Streamed over the highway WS as a
+    # `keys` message; consumers (renderers, plugins) read it from there.
+    keys: dict | None = None
+    # Sanitized song-level tempo + time-signature maps from `song_timeline.json`
+    # (feedpak 1.2.0). `tempos`: [{time, bpm}]; `time_signatures`: [{time, ts}].
+    # None when absent/empty. Streamed over the highway WS (`tempos` /
+    # `time_signatures` messages); a per-chart arrangement `tempos` overrides
+    # `tempos` for that chart (spec §6.10).
+    tempos: list | None = None
+    time_signatures: list | None = None
     # Maps arrangement id → validated notation payload.  None when no
     # arrangement passed schema validation; a non-empty dict only when at least
     # one arrangement carried a `notation:` sub-key whose file loaded and passed
@@ -252,9 +402,6 @@ class LoadedSloppak:
     # song.arrangements (not to manifest["arrangements"]) — skipped entries are
     # absent so indexing by song.arrangements index is safe.
     arrangement_ids: list[str | None] = field(default_factory=list)
-    # Declared `feedpak_version` from the manifest (semver string), or None when
-    # absent. Per the feedpak spec §4.1 an absent value is treated as "1.0.0".
-    feedpak_version: str | None = None
 
 
 def load_song(
@@ -453,6 +600,8 @@ def load_song(
     # already loaded onto the song object — song_timeline is the authoritative
     # source for timeline data in sloppaks that carry it.
     song_timeline_data: dict | None = None
+    tempos_data: list | None = None
+    time_sigs_data: list | None = None
     song_timeline_rel = manifest.get("song_timeline")
     if isinstance(song_timeline_rel, str) and song_timeline_rel:
         try:
@@ -535,6 +684,13 @@ def load_song(
                             )
                             continue
                     song_timeline_data = raw
+            # tempos / time_signatures (feedpak 1.2.0) are independent of the
+            # beats/sections validation above — all are optional — so load them
+            # whenever the payload parsed to a dict.
+            if isinstance(raw, dict):
+                tempos_data = sanitize_tempos(raw.get("tempos")) or None
+                time_sigs_data = _sanitize_time_signatures(
+                    raw.get("time_signatures")) or None
 
     # Optional shared lyrics file. Same safety posture as the drum_tab
     # loader above: constrain the manifest-declared path to source_dir
@@ -625,16 +781,80 @@ def load_song(
             default_on = bool(default_val)
         stems.append({"id": sid, "file": sfile, "default": default_on})
 
+    # Optional keys.json — song-level, instrument-independent key/scale track
+    # (manifest `keys:` key, spec §7.7). Permissive like the other side-files:
+    # missing / unreadable / malformed -> None, never fatal. Stored as a
+    # sanitized {version, events:[{t, key, scale?}]} (finite t, non-empty string
+    # key, sorted) so the highway WS can stream it without re-validating.
+    keys_data: dict | None = None
+    keys_rel = manifest.get("keys")
+    if isinstance(keys_rel, str) and keys_rel:
+        try:
+            k_path = (source_dir / keys_rel).resolve()
+            k_path.relative_to(source_dir.resolve())
+        except ValueError:
+            log.warning("sloppak: keys path %r escapes source_dir — skipped", keys_rel)
+            k_path = None
+        except OSError as e:
+            log.warning("sloppak: keys path resolution failed (%s) — skipped", e)
+            k_path = None
+        if k_path is not None and k_path.exists():
+            try:
+                raw = json.loads(k_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.warning("sloppak: failed to parse keys %r: %s", keys_rel, e)
+                raw = None
+            if raw is not None and not isinstance(raw, dict):
+                log.warning("sloppak: keys %r ignored — expected dict, got %s",
+                            keys_rel, type(raw).__name__)
+            elif isinstance(raw, dict):
+                if not isinstance(raw.get("events"), list):
+                    log.warning("sloppak: keys %r ignored — 'events' must be a list", keys_rel)
+                else:
+                    clean_events: list[dict] = []
+                    for ev in raw["events"]:
+                        if not isinstance(ev, dict):
+                            continue
+                        # Drop events with a missing / non-numeric / non-finite
+                        # time rather than silently rewriting them to 0.0 — a
+                        # bad `t` makes the whole event meaningless.
+                        t = ev.get("t")
+                        if (not isinstance(t, (int, float)) or isinstance(t, bool)
+                                or not math.isfinite(t)):
+                            continue
+                        t = float(t)
+                        key = ev.get("key")
+                        if not isinstance(key, str) or not key:
+                            continue
+                        entry = {"t": t, "key": key}
+                        scale = ev.get("scale")
+                        if isinstance(scale, str) and scale:
+                            entry["scale"] = scale
+                        clean_events.append(entry)
+                    clean_events.sort(key=lambda e: e["t"])
+                    # int only — a float version (incl. NaN/Inf, which json.loads
+                    # accepts) would raise on int(); default rather than abort the
+                    # load of an optional side-file.
+                    _ver = raw.get("version")
+                    keys_data = {
+                        "version": _ver if isinstance(_ver, int)
+                                   and not isinstance(_ver, bool) else 1,
+                        "events": clean_events,
+                    }
+
     return LoadedSloppak(
         song=song,
         stems=stems,
         source_dir=source_dir,
         manifest=manifest,
+        feedpak_version=read_feedpak_version(manifest),
         drum_tab=drum_tab_data,
         song_timeline=song_timeline_data,
+        tempos=tempos_data,
+        time_signatures=time_sigs_data,
+        keys=keys_data,
         notation_by_id=notation_by_id_data,
         arrangement_ids=arrangement_ids_acc,
-        feedpak_version=read_feedpak_version(manifest),
     )
 
 

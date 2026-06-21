@@ -445,6 +445,93 @@ def _gp6_element_variation_to_midi(element: int, variation: int) -> int | None:
     return _ART_TO_MIDI.get(art_id, art_id)
 
 
+# GPIF chord-diagram <Position finger="..."> names → RS finger integers,
+# matching the editor (E1) + gp2rs/pyguitarpro convention:
+# open/unused = -1, thumb = 0, index = 1, middle = 2, ring = 3, pinky = 4.
+_GPIF_FINGER_MAP = {
+    'none': -1, 'open': -1, '': -1,
+    'thumb': 0,
+    'index': 1,
+    'middle': 2,
+    'ring': 3, 'annular': 3,
+    'pinky': 4, 'little': 4,
+}
+
+
+def _rs_string_order(string_pitches: list[int]) -> dict[int, int]:
+    """Map each GPIF string index → RS string index (0 = lowest pitch).
+
+    Mirrors the per-note transform in ``convert_file`` (sort GPIF string
+    indices by open pitch ascending, tiebreak on index, use the rank), so a
+    chord diagram's string indices land on the same RS strings as the played
+    notes regardless of format direction (GP6 .gpx high→low, GP8 .gp low→high).
+    """
+    order = sorted(range(len(string_pitches)),
+                   key=lambda i: (string_pitches[i], i))
+    return {gp: rs for rs, gp in enumerate(order)}
+
+
+def _parse_chord_diagrams(track_el, string_pitches: list[int]) -> dict:
+    """Map fret-pattern tuple → ``{'name', 'fingers'}`` from a track's diagrams.
+
+    GP7/GP8 GPIF stores authored chord diagrams per track under
+    ``Properties/Property[@name="DiagramCollection"]/Items/Item``. Each Item
+    carries the chord name (its ``name`` attribute) and a ``<Diagram>`` with
+    per-string ``<Fret string=.. fret=..>`` plus
+    ``<Fingering><Position finger=.. string=..></Fingering>``. Diagram string
+    indices share the positional space of note ``String`` indices, so they go
+    through the same pitch-rank transform; ``<Fret fret>`` is the absolute fret
+    (``baseFret`` is display-only and not applied).
+
+    Keying by fret pattern (width-normalised to ≥6, exactly like the template
+    build site) keeps the join key consistent with GP5 + the editor's
+    preserve-by-fret-key (E0). Returns ``{}`` when there are no diagrams or no
+    string tuning (orientation/width would be undefined).
+    """
+    diagrams: dict[tuple, dict] = {}
+    if track_el is None or not string_pitches:
+        return diagrams
+    gp_to_rs = _rs_string_order(string_pitches)
+    for item in track_el.findall(
+            './/Property[@name="DiagramCollection"]/Items/Item'):
+        diag = item.find('Diagram')
+        if diag is None:
+            continue
+        rs_frets: dict[int, int] = {}
+        for fr in diag.findall('Fret'):
+            try:
+                gp = int(fr.get('string'))
+                fret = int(fr.get('fret'))
+            except (TypeError, ValueError):
+                continue
+            if fret < 0:
+                continue
+            rs = gp_to_rs.get(gp)
+            if rs is not None:
+                rs_frets[rs] = fret
+        if not rs_frets:
+            continue
+        width = max(6, max(rs_frets) + 1)
+        frets = [-1] * width
+        fingers = [-1] * width
+        for rs, fret in rs_frets.items():
+            frets[rs] = fret
+        for pos in diag.findall('Fingering/Position'):
+            try:
+                gp = int(pos.get('string'))
+            except (TypeError, ValueError):
+                continue
+            rs = gp_to_rs.get(gp)
+            if rs is None or not (0 <= rs < width) or frets[rs] < 0:
+                continue
+            fname = (pos.get('finger') or '').strip().lower()
+            fingers[rs] = _GPIF_FINGER_MAP.get(fname, -1)
+        # First diagram wins for a given voicing (stable, deterministic).
+        diagrams.setdefault(tuple(frets),
+                            {'name': item.get('name', '') or '', 'fingers': fingers})
+    return diagrams
+
+
 def _gpx_percussion_midis(track_el) -> list[int]:
     """Flatten a drumKit ``InstrumentSet``'s articulations into a list of GM
     ``OutputMidiNumber``s, positionally indexed to match a note's
@@ -1060,6 +1147,59 @@ def _gpx_bend_scale(root: ET.Element) -> float:
     return 50.0 if peak <= 400 else 2500.0
 
 
+def _gpx_bend_float(tp: dict, name: str):
+    """Read a GPIF bend `<Property><Float>` value from the property map, or None."""
+    el = tp.get(name)
+    if el is None:
+        return None
+    try:
+        return float(el.findtext('Float') or 0)
+    except (ValueError, TypeError):
+        return None
+
+
+def _gpx_bend_shape(tp: dict, divisor: float, sustain: float):
+    """Build ``(peak, intent, curve)`` from a GPIF note's bend Properties (§6.2.1).
+
+    GPIF describes a bend as origin / middle / destination value+offset pairs;
+    `value / divisor` is semitones (divisor auto-detected per file) and the
+    `*Offset` Properties are 0..100 (percent of the note's duration). Produces a
+    bnv curve of up to three points (mapping each offset to seconds-from-onset),
+    or ``None`` when there's no usable shape (no points, flat-zero, or a
+    zero-length note). When an offset Property is absent the stage falls back to
+    an evenly-spaced default (origin 0%, middle 50%, destination 100%).
+
+    NOTE: offset Property names should be confirmed against a real GP8 export;
+    the value path matches the existing scalar-bend extraction either way."""
+    from gp2rs import _bend_intent_from_values  # lazy: gp2rs<->gpx circular
+    stages = (
+        ('BendOriginValue', 'BendOriginOffset', 0.0),
+        ('BendMiddleValue', 'BendMiddleOffset1', 50.0),
+        ('BendDestinationValue', 'BendDestinationOffset', 100.0),
+    )
+    pts = []
+    for vkey, okey, default_off in stages:
+        v = _gpx_bend_float(tp, vkey)
+        if v is None:
+            continue
+        off = _gpx_bend_float(tp, okey)
+        if off is None:
+            off = default_off
+        off = max(0.0, min(100.0, off))
+        pts.append((off, round(v / divisor, 1)))
+    if not pts:
+        return 0.0, 0, None
+    pts.sort(key=lambda p: p[0])
+    values = [v for _, v in pts]
+    peak = round(max(values), 1)
+    intent = _bend_intent_from_values(values)
+    curve = None
+    if peak > 0 and sustain > 0 and len(pts) >= 2:
+        curve = [{"t": round(sustain * (off / 100.0), 3), "v": v}
+                 for off, v in pts]
+    return peak, intent, curve
+
+
 def _resolve_pending_slides(rs_notes, rs_chords, pending_slides):
     """Resolve GP slide flags collected during the beat loop into RS slide
     fields, now that every note on each string is known.
@@ -1277,6 +1417,10 @@ def convert_file(
         rs_chords: list[RsChord] = []
         chord_templates: list[ChordTemplate] = []
         chord_template_map: dict[tuple, int] = {}
+        # Authored chord diagrams (name + per-string fingering) for this track,
+        # keyed by fret pattern so they enrich matching played voicings.
+        chord_diagram_map = _parse_chord_diagrams(
+            track.get('_el'), track['string_pitches'])
         beats_out: list[RsBeat] = []
         sections: list[RsSection] = []
         section_counts: dict[str, int] = {}
@@ -1473,21 +1617,21 @@ def convert_file(
                                             rn.pull_off = True
                                         else:
                                             rn.hammer_on = True
-                                    # Bend: peak amount (GPIF bend value → semitones,
-                                    # scale auto-detected per file in _bend_divisor).
+                                    # Bend: `bn` is the peak; `bnv`/`bt` capture
+                                    # the shape over time (§6.2.1). value/divisor
+                                    # = semitones (scale auto-detected per file).
                                     if 'Bended' in _tp:
-                                        _bv = 0.0
-                                        for _bk in ('BendDestinationValue',
-                                                    'BendMiddleValue', 'BendOriginValue'):
-                                            _be = _tp.get(_bk)
-                                            if _be is not None:
-                                                try:
-                                                    _bv = max(_bv, float(
-                                                        _be.findtext('Float') or 0))
-                                                except (ValueError, TypeError):
-                                                    pass
-                                        if _bv > 0:
-                                            rn.bend = round(_bv / _bend_divisor, 1)
+                                        # Use the beat duration `dur`, not
+                                        # `rn.sustain` (zeroed for notes <= 0.2s),
+                                        # so short bends keep their bnv curve —
+                                        # matching the GP5 path, which maps over
+                                        # the raw note duration.
+                                        _peak, _intent, _curve = _gpx_bend_shape(
+                                            _tp, _bend_divisor, dur)
+                                        if _peak > 0:
+                                            rn.bend = _peak
+                                            rn.bend_intent = _intent
+                                            rn.bend_values = _curve
                                     # Slide flags: 1/2 = pitched slide to the next
                                     # note; 4 = slide out down, 8 = out up. Resolved
                                     # post-loop (needs the next note on the string).
@@ -1533,8 +1677,12 @@ def convert_file(
                                     fkey = tuple(frets_t)
                                     if fkey not in chord_template_map:
                                         chord_template_map[fkey] = len(chord_templates)
+                                        _diag = chord_diagram_map.get(fkey)
                                         chord_templates.append(ChordTemplate(
-                                            name='', frets=list(frets_t), fingers=[-1] * width,
+                                            name=(_diag['name'] if _diag else ''),
+                                            frets=list(frets_t),
+                                            fingers=(list(_diag['fingers']) if _diag
+                                                     else [-1] * width),
                                         ))
                                     rs_chords.append(RsChord(
                                         time=t,
