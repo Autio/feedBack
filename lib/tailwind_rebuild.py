@@ -24,6 +24,8 @@ import tempfile
 import threading
 from pathlib import Path
 
+from env_compat import getenv_compat
+
 log = logging.getLogger("feedBack.tailwind")
 
 # Pin matches scripts/build-tailwind.sh and the Dockerfile build stage so every
@@ -45,7 +47,7 @@ APP_DIR = Path(__file__).resolve().parent.parent
 
 
 def _user_plugins_dir() -> Path | None:
-    raw = os.environ.get("FEEDBACK_PLUGINS_DIR", "").strip()
+    raw = (getenv_compat("FEEDBACK_PLUGINS_DIR", "") or "").strip()
     if not raw:
         return None
     p = Path(raw)

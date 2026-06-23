@@ -3310,7 +3310,9 @@ function setupAppUpdates() {
     // iframes, privacy modes, etc.); fall back to the default channel so the
     // panel still renders rather than aborting wiring entirely.
     let storedRaw = null;
-    try { storedRaw = localStorage.getItem('feedBack-update-channel'); } catch (_) { /* fall through */ }
+    // Read the canonical key, falling back to the pre-rename
+    // 'slopsmith-update-channel' so an existing channel preference survives.
+    try { storedRaw = localStorage.getItem('feedBack-update-channel') || localStorage.getItem('slopsmith-update-channel'); } catch (_) { /* fall through */ }
     const stored = APP_UPDATE_CHANNELS.includes(storedRaw) ? storedRaw : 'stable';
     channelSelect.value = stored;
 
@@ -3395,7 +3397,7 @@ function setupAppUpdates() {
         channelSelect.addEventListener('change', async () => {
             const val = channelSelect.value;
             if (!APP_UPDATE_CHANNELS.includes(val)) return;
-            try { localStorage.setItem('feedBack-update-channel', val); } catch (_) {}
+            try { localStorage.setItem('feedBack-update-channel', val); localStorage.removeItem('slopsmith-update-channel'); } catch (_) {}
             try {
                 // Await setChannel so the status line reflects what actually
                 // happened — rendering "Channel set" unconditionally would

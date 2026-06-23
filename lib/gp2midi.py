@@ -8,6 +8,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from env_compat import getenv_compat
+
 log = logging.getLogger("feedBack.lib.gp2midi")
 
 import guitarpro
@@ -156,7 +158,7 @@ def _find_soundfont() -> str | None:
       2. Bundled ``<RESOURCESPATH>/soundfonts/*.sf2`` (Electron desktop builds)
       3. Common system locations per OS.
     """
-    override = os.environ.get("FEEDBACK_SOUNDFONT")
+    override = getenv_compat("FEEDBACK_SOUNDFONT")
     if override:
         if os.path.isfile(override):
             return override

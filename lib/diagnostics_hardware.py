@@ -16,6 +16,8 @@ import platform
 import subprocess
 from pathlib import Path
 
+from env_compat import getenv_compat
+
 SCHEMA = "system.hardware.v1"
 
 
@@ -41,7 +43,7 @@ def detect_runtime() -> dict:
     nvidia-smi / psutil CPU probes.
     """
     out: dict = {"kind": "bare", "in_docker": False, "in_kubernetes": False}
-    env_runtime = os.environ.get("FEEDBACK_RUNTIME", "").strip().lower()
+    env_runtime = (getenv_compat("FEEDBACK_RUNTIME", "") or "").strip().lower()
     if env_runtime in ("electron", "docker", "bare"):
         out["kind"] = env_runtime
     if Path("/.dockerenv").exists():

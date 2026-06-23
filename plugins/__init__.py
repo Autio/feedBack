@@ -1118,7 +1118,7 @@ def load_plugins(app: FastAPI, context: dict, progress_cb=None, route_setup_fn=N
 
     # Collect plugin directories — user plugins first so they override built-in
     plugin_dirs = []
-    user_plugins_dir = os.environ.get("FEEDBACK_PLUGINS_DIR") or os.environ.get("FEEDBACK_PLUGINS_DIR")
+    user_plugins_dir = os.environ.get("FEEDBACK_PLUGINS_DIR") or os.environ.get("SLOPSMITH_PLUGINS_DIR")
     if user_plugins_dir:
         user_path = Path(user_plugins_dir)
         if user_path.is_dir() and user_path != PLUGINS_DIR:

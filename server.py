@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from logging_setup import configure_logging
+from env_compat import getenv_compat
 configure_logging()
 
 log = logging.getLogger("feedBack.server")
@@ -230,7 +231,7 @@ _DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
 
 @app.middleware("http")
 async def _demo_mode_guard(request: Request, call_next):
-    if os.environ.get("FEEDBACK_DEMO_MODE") or os.environ.get("FEEDBACK_DEMO_MODE") == "1":
+    if getenv_compat("FEEDBACK_DEMO_MODE") or getenv_compat("FEEDBACK_DEMO_MODE") == "1":
         path = request.url.path
         for method, pattern in _DEMO_BLOCKED:
             if request.method == method and pattern.match(path):
@@ -275,8 +276,8 @@ SLOPPAK_CACHE_DIR = CONFIG_DIR / "sloppak_cache"
 
 
 def _env_flag(name: str) -> bool:
-    """Parse a conventional boolean env flag."""
-    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+    """Parse a conventional boolean env flag (honours legacy SLOPSMITH_* alias)."""
+    return (getenv_compat(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 # Canonical Tuning-filter grouping key (feedBack#867). tuning_name collapses
@@ -3040,7 +3041,7 @@ def _make_scan_executor():
     # A malformed override falls back to the core count rather than crashing.
     try:
         max_workers = int(
-            os.environ.get("FEEDBACK_MAX_SCAN_WORKERS")
+            getenv_compat("FEEDBACK_MAX_SCAN_WORKERS")
             or os.environ.get("SCAN_MAX_WORKERS")
             or (os.cpu_count() or 1)
         )
@@ -3090,7 +3091,7 @@ def _get_progression_content() -> dict:
         with _progression_content_lock:
             if _progression_content is None:
                 import progression as progression_mod
-                root = os.environ.get("FEEDBACK_PROGRESSION_DATA") or (
+                root = getenv_compat("FEEDBACK_PROGRESSION_DATA") or (
                     _feedBack_server_root() / "data" / "progression"
                 )
                 content, warnings = progression_mod.load_content(root)
@@ -3488,7 +3489,7 @@ async def startup_events():
 
     # Load plugins asynchronously so HTTP routes and the desktop window can
     # come up immediately while heavy plugin imports/install steps continue.
-    _sync_mode = os.environ.get("FEEDBACK_SYNC_STARTUP", "").lower() in {"1", "true", "yes", "on"}
+    _sync_mode = getenv_compat("FEEDBACK_SYNC_STARTUP", "").lower() in {"1", "true", "yes", "on"}
 
     def _load_plugins_background():
         try:
@@ -3723,7 +3724,7 @@ async def startup_events():
         threading.Thread(target=_load_plugins_background, daemon=True).start()
 
     global _DEMO_JANITOR_STARTED, _DEMO_JANITOR_THREAD
-    if os.environ.get("FEEDBACK_DEMO_MODE") or os.environ.get("FEEDBACK_DEMO_MODE") == "1" and not _DEMO_JANITOR_STARTED:
+    if getenv_compat("FEEDBACK_DEMO_MODE") or getenv_compat("FEEDBACK_DEMO_MODE") == "1" and not _DEMO_JANITOR_STARTED:
         _DEMO_JANITOR_STARTED = True
         _DEMO_JANITOR_STOP.clear()
         def _janitor():
@@ -6183,7 +6184,7 @@ def _diag_plugins_roots() -> list[Path]:
     orphans in the external dir are reflected in the bundle.
     """
     roots: list[Path] = []
-    user_dir = os.environ.get("FEEDBACK_PLUGINS_DIR", "").strip()
+    user_dir = getenv_compat("FEEDBACK_PLUGINS_DIR", "").strip()
     if user_dir:
         p = Path(user_dir)
         if p.is_dir():
@@ -7683,7 +7684,7 @@ def index():
     # UI remains fully available as a fallback — opt back in with
     # FEEDBACK_UI=v2 (or =legacy), or hit the dedicated /v2 route below (which
     # serves it regardless of the env var).
-    if os.environ.get("FEEDBACK_UI") or os.environ.get("FEEDBACK_UI") in ("v2", "legacy"):
+    if getenv_compat("FEEDBACK_UI") or getenv_compat("FEEDBACK_UI") in ("v2", "legacy"):
         return FileResponse(str(STATIC_DIR / "index.html"))
     return FileResponse(str(STATIC_DIR / "v3" / "index.html"))
 

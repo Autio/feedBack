@@ -336,7 +336,7 @@ def setup(app, context):
     # Duplicates are removed via a seen-set keyed on resolved paths.
     def _resolve_plugin_dirs():
         roots = []
-        env_dir = os.environ.get("FEEDBACK_PLUGINS_DIR") or os.environ.get("FEEDBACK_PLUGINS_DIR")
+        env_dir = os.environ.get("FEEDBACK_PLUGINS_DIR") or os.environ.get("SLOPSMITH_PLUGINS_DIR")
         if env_dir:
             roots.append(Path(env_dir))
         # Built-in plugins/ next to server.py (one level above this file's
