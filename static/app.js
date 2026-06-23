@@ -5764,7 +5764,7 @@ window.feedBack.on('song:ready', () => {
 // calls playSong(). Once the chart is ready (playSong's own clearLoop() has
 // already run, so the loop won't be wiped), arm the loop over the selected
 // region and start playback so the user lands inside the loop directly.
-window.slopsmith.on('song:ready', () => {
+window.feedBack.on('song:ready', () => {
     _updateEditRegionBtn();
     const pend = window._pendingHighwayLoop;
     if (!pend) return;
