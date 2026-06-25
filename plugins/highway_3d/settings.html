@@ -577,6 +577,30 @@
                     <span>Glowy</span>
                 </div>
             </div>
+
+            <div class="mt-4">
+                <label for="h3d-hitfx" class="text-xs font-medium text-gray-400 mb-1 block">
+                    Hit feedback intensity: <span id="h3d-hitfx-label">0.70</span>
+                </label>
+                <input type="range" id="h3d-hitfx" min="0" max="1" step="0.05" value="0.70"
+                    oninput="document.getElementById('h3d-hitfx-label').textContent = parseFloat(this.value).toFixed(2); window.h3dBgSetHitFx && window.h3dBgSetHitFx(this.value)"
+                    onchange="window.h3dBgSetHitFx && window.h3dBgSetHitFx(this.value)"
+                    class="w-full accent-accent">
+                <p class="text-[10px] text-gray-500 mt-1">
+                    How much "juice" a nailed note gets — the strike-line flash and the
+                    spark burst at the hit line. <em>0</em> = colour verdict only (no sparks).
+                </p>
+            </div>
+
+            <div class="mt-3 flex items-start justify-between gap-3">
+                <label for="h3d-cinematic" class="text-xs font-medium text-gray-400">
+                    Cinematic lighting
+                    <span class="block text-[10px] text-gray-500 font-normal">Darker stage so the glowing notes pop against it. Turn off for the brighter, flatter look.</span>
+                </label>
+                <input type="checkbox" id="h3d-cinematic" checked
+                    onchange="window.h3dBgSetCinematic && window.h3dBgSetCinematic(this.checked)"
+                    class="accent-accent mt-0.5">
+            </div>
         </div>
     </details>
 </div>

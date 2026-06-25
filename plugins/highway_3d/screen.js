@@ -1768,7 +1768,7 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', bgTheme: 'default', hwTheme: 'default', showFretOnNote: true, fretNumberGhostScope: 'chords', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramVisible: true, chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 1, projectionVisible: true, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: false, sectionHudPosition: 'tr', sectionHudSize: 0.5, toneHudVisible: false, toneHudPosition: 'tl', toneHudSize: 0.5, fpsVisible: false, fretDividersVisible: true, slideArrowApproachVisible: true, slideArrowNeckVisible: true, slideArrowChainPreviewVisible: true };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', bgTheme: 'default', hwTheme: 'default', showFretOnNote: true, fretNumberGhostScope: 'chords', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramVisible: true, chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 1, projectionVisible: true, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: false, sectionHudPosition: 'tr', sectionHudSize: 0.5, toneHudVisible: false, toneHudPosition: 'tl', toneHudSize: 0.5, fpsVisible: false, fretDividersVisible: true, slideArrowApproachVisible: true, slideArrowNeckVisible: true, slideArrowChainPreviewVisible: true, hitFx: 0.7, cinematic: true, verdictMarks: true, timingFx: true, streakFx: true };
     // User-selectable, persistable bg styles — must mirror settings.html's
     // VALID_STYLES. 'venue' is deliberately NOT here: it is an internal effective
     // style reached only via _venueSceneOverride (the viz-picker Venue flow), so
@@ -2115,7 +2115,7 @@
     // means (fall back to default rather than silently flipping to
     // false). Add new boolean keys to BG_DEFAULTS and they pick this
     // up via the dispatch below.
-    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible', 'projectionVisible', 'chordDiagramVisible', 'fpsVisible', 'toneHudVisible', 'fretDividersVisible', 'slideArrowApproachVisible', 'slideArrowNeckVisible', 'slideArrowChainPreviewVisible']);
+    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible', 'projectionVisible', 'chordDiagramVisible', 'fpsVisible', 'toneHudVisible', 'fretDividersVisible', 'slideArrowApproachVisible', 'slideArrowNeckVisible', 'slideArrowChainPreviewVisible', 'cinematic', 'verdictMarks', 'timingFx', 'streakFx']);
     function _bgCoerceBool(val, fallback) {
         if (val === 'true' || val === '1') return true;
         if (val === 'false' || val === '0') return false;
@@ -2125,7 +2125,7 @@
     // hysteresis; zoomSmoothing the zoom dead zone; tiltSmoothing the
     // vertical-tilt deadband + correction strength. All three slider-
     // shaped settings share the same parse + clamp behaviour.
-    const _BG_FLOAT_KEYS = new Set(['intensity', 'cameraSmoothing', 'zoomSmoothing', 'tiltSmoothing', 'cameraLockZoom', 'textSize', 'vibrancy', 'glow', 'chordDiagramSize', 'sectionHudSize', 'toneHudSize']);
+    const _BG_FLOAT_KEYS = new Set(['intensity', 'cameraSmoothing', 'zoomSmoothing', 'tiltSmoothing', 'cameraLockZoom', 'textSize', 'vibrancy', 'glow', 'chordDiagramSize', 'sectionHudSize', 'toneHudSize', 'hitFx']);
     function _bgCoerce(key, val) {
         if (_BG_FLOAT_KEYS.has(key)) {
             const n = parseFloat(val);
@@ -2259,6 +2259,11 @@
     window.h3dBgSetTextSize = (v) => _bgWriteGlobal('textSize', v);
     window.h3dBgSetVibrancy = (v) => _bgWriteGlobal('vibrancy', v);
     window.h3dBgSetGlow     = (v) => _bgWriteGlobal('glow', v);
+    window.h3dBgSetHitFx        = (v) => _bgWriteGlobal('hitFx', v);
+    window.h3dBgSetCinematic    = (v) => _bgWriteGlobal('cinematic', !!v);
+    window.h3dBgSetVerdictMarks = (v) => _bgWriteGlobal('verdictMarks', !!v);
+    window.h3dBgSetTimingFx     = (v) => _bgWriteGlobal('timingFx', !!v);
+    window.h3dBgSetStreakFx     = (v) => _bgWriteGlobal('streakFx', !!v);
     window.h3dBgSetToneHudVisible   = (v) => _bgWriteGlobal('toneHudVisible', !!v);
     window.h3dBgSetToneHudPosition  = (v) => _bgWriteGlobal('toneHudPosition', v);
     window.h3dBgSetToneHudSize      = (v) => _bgWriteGlobal('toneHudSize', v);
@@ -3552,6 +3557,18 @@
         // linear blend every frame.
         let vibrancy            = BG_DEFAULTS.vibrancy;
         let glowMul             = BG_DEFAULTS.glow;
+        let _hitFx              = BG_DEFAULTS.hitFx;
+        let _cinematic          = BG_DEFAULTS.cinematic;
+        let _verdictMarks       = BG_DEFAULTS.verdictMarks;
+        let _timingFx           = BG_DEFAULTS.timingFx;
+        let _streakFx           = BG_DEFAULTS.streakFx;
+        let _strikeLine         = null;   // #1 glowing bar at the hit line
+        let _ndHitFlash         = 0;      // eased hit pulse for the strike line
+        let _ndMissFlash        = 0;      // eased miss pulse for the strike line
+        let _sparkPts = null, _sparkPos = null, _sparkCol = null, _sparkVel = null, _sparkLife = null;
+        const _SPARK_N = 256;
+        const _sparkSeen = new Map();     // note-key -> expiry; one burst per hit
+        let _juiceLastT = 0;              // frame-dt clock for the juice layer
         let fpsVisible           = BG_DEFAULTS.fpsVisible;
         let fretDividersVisible  = BG_DEFAULTS.fretDividersVisible;
         let chordDiagramVisible  = BG_DEFAULTS.chordDiagramVisible;
@@ -5912,10 +5929,23 @@
             dirLight = new T.DirectionalLight(0xffffff, 0.8);
             dirLight.position.set(40 * K, 120 * K, 80 * K);
             scene.add(dirLight);
+            _applyCinematic();
 
             fretG = new T.Group(); scene.add(fretG);
             tuningLblG = new T.Group(); scene.add(tuningLblG);
             noteG = new T.Group(); scene.add(noteG);
+            // Hit sparks (#3): a pooled additive Points cloud; a small burst fires at a
+            // gem on a verified hit (spawned in the verdict block, advanced in the render loop).
+            _sparkPos = new Float32Array(_SPARK_N * 3); _sparkCol = new Float32Array(_SPARK_N * 3);
+            _sparkVel = new Float32Array(_SPARK_N * 3); _sparkLife = new Float32Array(_SPARK_N);
+            {
+                const sg = new T.BufferGeometry();
+                sg.setAttribute('position', new T.BufferAttribute(_sparkPos, 3).setUsage(T.DynamicDrawUsage));
+                sg.setAttribute('color', new T.BufferAttribute(_sparkCol, 3).setUsage(T.DynamicDrawUsage));
+                const sm = new T.PointsMaterial({ size: 1.7 * K, vertexColors: true, transparent: true, opacity: 0.95, depthWrite: false, blending: T.AdditiveBlending, sizeAttenuation: true });
+                _sparkPts = new T.Points(sg, sm); _sparkPts.frustumCulled = false; _sparkPts.renderOrder = 8;
+                scene.add(_sparkPts);
+            }
             beatG = new T.Group(); scene.add(beatG);
             lblG = new T.Group(); scene.add(lblG);
 
@@ -7347,6 +7377,12 @@
             textSize             = _bgReadSetting(panelKey, 'textSize');
             vibrancy             = _bgReadSetting(panelKey, 'vibrancy');
             glowMul              = _bgReadSetting(panelKey, 'glow');
+            _hitFx               = _bgReadSetting(panelKey, 'hitFx');
+            _cinematic           = _bgReadSetting(panelKey, 'cinematic');
+            _verdictMarks        = _bgReadSetting(panelKey, 'verdictMarks');
+            _timingFx            = _bgReadSetting(panelKey, 'timingFx');
+            _streakFx            = _bgReadSetting(panelKey, 'streakFx');
+            _applyCinematic();
             fpsVisible           = _bgReadSetting(panelKey, 'fpsVisible');
             fretDividersVisible  = _bgReadSetting(panelKey, 'fretDividersVisible');
             chordDiagramVisible  = _bgReadSetting(panelKey, 'chordDiagramVisible');
@@ -7785,6 +7821,45 @@
                 : d;
             return parseInt(s.slice(1), 16);
         }
+        // Cinematic lighting (#2): darken ambient so emissive gems have a dark
+        // surround to pop against; strengthen the key light for modelling.
+        // Toggle via the 'cinematic' setting so it's directly comparable.
+        function _applyCinematic() {
+            if (!ambLight || !dirLight) return;
+            ambLight.intensity = _cinematic ? 0.35 : 0.85;
+            dirLight.intensity = _cinematic ? 1.15 : 0.8;
+        }
+        function _sparkBurst(x, y, z, hex, count) {
+            if (!_sparkPts || count <= 0) return;
+            const r = ((hex >> 16) & 255) / 255, g = ((hex >> 8) & 255) / 255, b = (hex & 255) / 255;
+            let made = 0;
+            for (let i = 0; i < _SPARK_N && made < count; i++) {
+                if (_sparkLife[i] > 0) continue;
+                const j = i * 3, ang = Math.random() * Math.PI * 2, sp = (7 + Math.random() * 20) * K;
+                _sparkPos[j] = x; _sparkPos[j + 1] = y; _sparkPos[j + 2] = z;
+                _sparkVel[j] = Math.cos(ang) * sp; _sparkVel[j + 1] = (12 + Math.random() * 24) * K; _sparkVel[j + 2] = Math.sin(ang) * sp * 0.55;
+                _sparkCol[j] = r; _sparkCol[j + 1] = g; _sparkCol[j + 2] = b;
+                _sparkLife[i] = 0.40 + Math.random() * 0.28; made++;
+            }
+        }
+        function _sparkUpdate(dt) {
+            if (!_sparkPts) return;
+            const grav = 55 * K; let any = false;
+            for (let i = 0; i < _SPARK_N; i++) {
+                if (_sparkLife[i] <= 0) continue;
+                const j = i * 3;
+                _sparkLife[i] -= dt;
+                if (_sparkLife[i] <= 0) { _sparkCol[j] = _sparkCol[j + 1] = _sparkCol[j + 2] = 0; continue; }
+                any = true;
+                _sparkVel[j + 1] -= grav * dt;
+                _sparkPos[j] += _sparkVel[j] * dt; _sparkPos[j + 1] += _sparkVel[j + 1] * dt; _sparkPos[j + 2] += _sparkVel[j + 2] * dt;
+                const fade = 1 - Math.min(1, dt * 3.2);
+                _sparkCol[j] *= fade; _sparkCol[j + 1] *= fade; _sparkCol[j + 2] *= fade;
+            }
+            _sparkPts.geometry.attributes.position.needsUpdate = true;
+            _sparkPts.geometry.attributes.color.needsUpdate = true;
+            _sparkPts.visible = any;
+        }
         function buildBoard() {
             // Dispose before clearing (traverse: nut/headstock may live in a Group).
             while (fretG.children.length) {
@@ -7830,6 +7905,17 @@
             p.rotation.x = -Math.PI / 2;
             p.position.set(board.center, S_BASE - NH / 2 - 2 * K, -blAhead / 2);
             fretG.add(p);
+
+            // Strike line (#1): a thin glowing bar at the hit line (Z=0). Idle dim;
+            // flashes green on a hit / red on a miss (driven each frame in the render loop).
+            {
+                const slGeo = new T.BoxGeometry(bw, NH * 0.42, 0.7 * K);
+                const slMat = new T.MeshBasicMaterial({ color: 0x2a3a52, transparent: true, opacity: 0.0, depthWrite: false, blending: T.AdditiveBlending });
+                _strikeLine = new T.Mesh(slGeo, slMat);
+                _strikeLine.position.set(board.center, S_BASE - NH / 2, 0);
+                _strikeLine.renderOrder = 6;
+                fretG.add(_strikeLine);
+            }
 
             // Thin Line strings (glow layer). Retained in stringLineGlows[]
             // so vibrancy slider changes can mutate opacity in place
@@ -12760,12 +12846,23 @@
                 // hit/active → green outline (mHitBright[s]) + green lateral faces;
                 // miss → magenta-red outline (mMissOutline) + dark lateral faces; front/back stay transparent.
                 if (_ndCs) {
+                    const _vAlpha = (_ndCsIsObj && typeof _ndCs.alpha === 'number') ? _ndCs.alpha : 1;
                     if (_ndState === 'miss') {
                         _ndOutline = mMissOutline;
                         _ndFaceMat = mMissEdgeArrays;
+                        if (_vAlpha > _ndMissFlash) _ndMissFlash = _vAlpha;
                     } else if (_ndGood) {
                         _ndOutline = mHitBright[s] ?? mGlow[s];
                         _ndFaceMat = mHitBrightArrays[s] ?? null;
+                        if (_vAlpha > _ndHitFlash) _ndHitFlash = _vAlpha;
+                        if (_hitFx > 0 && _vAlpha > 0.5) {
+                            const _spk = s + '|' + n.f + '|' + n.t.toFixed(2);
+                            if (!(_sparkSeen.get(_spk) > now)) {
+                                _sparkSeen.set(_spk, now + 1.0);
+                                if (_sparkSeen.size > 600) _sparkSeen.clear();
+                                _sparkBurst(x, y, noteZ, 0x22ff88, Math.round(7 + 13 * _hitFx));
+                            }
+                        }
                     }
                 }
 
@@ -14012,6 +14109,7 @@
             for (const g of _ownedSharedGeos) g?.dispose?.();
             _ownedSharedGeos.length = 0;
             txtCache = {};
+            if (_sparkPts) { try { _sparkPts.geometry.dispose(); _sparkPts.material.dispose(); } catch (e) {} _sparkPts = null; }
             if (ren) { ren.dispose(); ren = null; }
             scene = cam = noteG = beatG = lblG = fretG = tuningLblG = null;
             ambLight = dirLight = null;
@@ -14336,6 +14434,21 @@
                         bcCtrl.tint(null, 0);
                     }
                     bcCtrl.render();
+                }
+                {
+                    const _jNow = performance.now();
+                    const _jdt = _juiceLastT === 0 ? 1 / 60 : Math.min(0.05, (_jNow - _juiceLastT) / 1000);
+                    _juiceLastT = _jNow;
+                    _sparkUpdate(_jdt);
+                    if (_strikeLine) {
+                        const hf = _ndHitFlash * _hitFx, mf = _ndMissFlash * _hitFx;
+                        const lit = Math.max(hf, mf);
+                        const m = _strikeLine.material;
+                        m.opacity = 0.10 + 0.85 * Math.min(1, lit);
+                        if (lit > 0.002) m.color.setHex(hf >= mf ? 0x22ff88 : 0xff0066);
+                        else m.color.setHex(0x2a3a52);
+                        _ndHitFlash *= 0.82; _ndMissFlash *= 0.82;
+                    }
                 }
                 pbBeg(6); ren.render(scene, cam); pbEnd(6);
                 if (lyricsCtx && lyricsCanvas) {
