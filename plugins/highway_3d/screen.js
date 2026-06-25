@@ -3569,6 +3569,7 @@
         const _SPARK_N = 256;
         const _sparkSeen = new Map();     // note-key -> expiry; one burst per hit
         let _juiceLastT = 0;              // frame-dt clock for the juice layer
+        let _streakHits = 0, _streakHeat = 0;  // #7 consecutive-hit escalation
         let fpsVisible           = BG_DEFAULTS.fpsVisible;
         let fretDividersVisible  = BG_DEFAULTS.fretDividersVisible;
         let chordDiagramVisible  = BG_DEFAULTS.chordDiagramVisible;
@@ -12671,6 +12672,7 @@
             // blocks, so _showHit can be a const and _ndGood is available for the
             // sustain trail (which renders even when skipBody=true for slide targets).
             let _ndGood = false;    // true when provider confirms hit/active
+            let _hitPunch = 1;      // #3 per-gem scale-punch on a fresh hit
             let _ndState = null;    // 'hit'|'active'|'miss'|null; null → fall back to proximity heuristic
             let _ndCs = null;       // raw provider response — truthy when provider returned a verdict
             let _ndCsIsObj = false; // typeof _ndCs === 'object'
@@ -12851,16 +12853,22 @@
                         _ndOutline = mMissOutline;
                         _ndFaceMat = mMissEdgeArrays;
                         if (_vAlpha > _ndMissFlash) _ndMissFlash = _vAlpha;
+                        _streakHits = 0;            // #7 break the streak (heat eases down)
+                        if (_verdictMarks) _ndLabels.push({ x, y: y + NH * 1.7, z: noteZ + 0.02, labels: [{ text: '✗', color: '#ff5a7a' }] });  // #6
                     } else if (_ndGood) {
                         _ndOutline = mHitBright[s] ?? mGlow[s];
                         _ndFaceMat = mHitBrightArrays[s] ?? null;
                         if (_vAlpha > _ndHitFlash) _ndHitFlash = _vAlpha;
+                        _hitPunch = 1 + 0.22 * _hitFx * _vAlpha;   // #3 scale-punch (biggest at strike, eases)
+                        if (_verdictMarks) _ndLabels.push({ x, y: y + NH * 1.7, z: noteZ + 0.02, labels: [{ text: '✓', color: '#22ff88' }] });  // #6
                         if (_hitFx > 0 && _vAlpha > 0.5) {
                             const _spk = s + '|' + n.f + '|' + n.t.toFixed(2);
                             if (!(_sparkSeen.get(_spk) > now)) {
                                 _sparkSeen.set(_spk, now + 1.0);
                                 if (_sparkSeen.size > 600) _sparkSeen.clear();
-                                _sparkBurst(x, y, noteZ, 0x22ff88, Math.round(7 + 13 * _hitFx));
+                                _streakHits++;
+                                const _heatMul = _streakFx ? (1 + 0.85 * _streakHeat) : 1;   // #7 escalate
+                                _sparkBurst(x, y, noteZ, 0x22ff88, Math.round((7 + 13 * _hitFx) * _heatMul));
                             }
                         }
                     }
@@ -12975,6 +12983,7 @@
                 } else {
                     core.scale.set(rimXY, rimXY, 2.5 * rimZ);
                 }
+                if (_hitPunch !== 1) core.scale.multiplyScalar(_hitPunch);   // #3 hit scale-punch
                 // Fret digits on fretted (n.f > 0) flying notes deliberately
                 // omitted: the showFretOnNote setting and its UI helper text
                 // promise digits on the fretboard ghost only, never on the
@@ -14440,11 +14449,12 @@
                     const _jdt = _juiceLastT === 0 ? 1 / 60 : Math.min(0.05, (_jNow - _juiceLastT) / 1000);
                     _juiceLastT = _jNow;
                     _sparkUpdate(_jdt);
+                    _streakHeat += (Math.min(1, _streakHits / 16) - _streakHeat) * 0.08;   // #7 ease heat
                     if (_strikeLine) {
                         const hf = _ndHitFlash * _hitFx, mf = _ndMissFlash * _hitFx;
                         const lit = Math.max(hf, mf);
                         const m = _strikeLine.material;
-                        m.opacity = 0.10 + 0.85 * Math.min(1, lit);
+                        m.opacity = 0.10 + (_streakFx ? 0.12 * _streakHeat : 0) + 0.85 * Math.min(1, lit);
                         if (lit > 0.002) m.color.setHex(hf >= mf ? 0x22ff88 : 0xff0066);
                         else m.color.setHex(0x2a3a52);
                         _ndHitFlash *= 0.82; _ndMissFlash *= 0.82;
