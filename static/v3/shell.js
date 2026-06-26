@@ -50,6 +50,7 @@
         { key: 'virtuoso',    screen: 'plugin-virtuoso',    label: 'Virtuoso - Practice', group: null, icon: 'target' },
         { key: 'rig_builder', screen: 'plugin-rig_builder', label: 'Rig Builder', group: null,      icon: 'amp' },
         { key: 'editor',      screen: 'plugin-editor',      label: 'Song Editor', group: null,      icon: 'edit' },
+        { key: 'audio_engine', screen: 'plugin-audio_engine', label: 'Audio', group: null,          icon: 'audio' },
         // Not in the sidebar groups, but routable (profile badge → here).
         { key: 'profile',   screen: 'v3-profile',   label: 'Profile',         group: null,      icon: 'user' },
     ];
@@ -61,6 +62,7 @@
         { navKey: 'virtuoso',    pluginId: 'virtuoso',    slotId: 'v3-nav-virtuoso',    anchorAfter: 'feedbarcade' },
         { navKey: 'rig_builder', pluginId: 'rig_builder', slotId: 'v3-nav-rig-builder', anchorAfter: 'saved' },
         { navKey: 'editor',      pluginId: 'editor',      slotId: 'v3-nav-editor',     anchorAfter: 'songs' },
+        { navKey: 'audio_engine', pluginId: 'audio_engine', slotId: 'v3-nav-audio-engine', anchorAfter: 'settings' },
     ];
     const TOPBAR_KEYS = ['home', 'songs', 'plugins', 'settings'];
     const SIDEBAR_GROUPS = ['HOME', 'LIBRARY'];
@@ -82,6 +84,7 @@
         amp: 'M4 5h16a1 1 0 011 1v12a1 1 0 01-1 1H4a1 1 0 01-1-1V6a1 1 0 011-1zm11 4a3 3 0 100 6 3 3 0 000-6zM6.5 8.5h.01M9 8.5h.01',
         target: 'M12 3a9 9 0 100 18 9 9 0 000-18zm0 4a5 5 0 100 10 5 5 0 000-10zm0 4a1 1 0 100 2 1 1 0 000-2z',
         edit: 'M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7M18.5 2.5a2.1 2.1 0 013 3L12 15l-4 1 1-4 9.5-9.5z',
+        audio: 'M11 5L6 9H3v6h3l5 4V5zM15.5 8.5a5 5 0 010 7M19 6a9 9 0 010 12',
     };
     function iconSvg(name) {
         const d = ICONS[name] || ICONS.disc;
