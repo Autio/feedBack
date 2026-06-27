@@ -593,6 +593,16 @@
             </div>
 
             <div class="mt-3 flex items-start justify-between gap-3">
+                <label for="h3d-sparks" class="text-xs font-medium text-gray-400">
+                    Hit sparks
+                    <span class="block text-[10px] text-gray-500 font-normal">The particle burst that pops off a note the instant it's detected as a hit. Turn off for a calmer highway — the strike-line flash and colour verdict stay.</span>
+                </label>
+                <input type="checkbox" id="h3d-sparks" checked
+                    onchange="window.h3dBgSetSparks && window.h3dBgSetSparks(this.checked)"
+                    class="accent-accent mt-0.5">
+            </div>
+
+            <div class="mt-3 flex items-start justify-between gap-3">
                 <label for="h3d-cinematic" class="text-xs font-medium text-gray-400">
                     Cinematic lighting
                     <span class="block text-[10px] text-gray-500 font-normal">Darker stage so the glowing notes pop against it. Turn off for the brighter, flatter look.</span>

@@ -1768,7 +1768,7 @@
         return _bgBandsCache;
     }
 
-    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', bgTheme: 'default', hwTheme: 'default', showFretOnNote: true, fretNumberGhostScope: 'chords', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramVisible: true, chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 1, projectionVisible: true, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: false, sectionHudPosition: 'tr', sectionHudSize: 0.5, toneHudVisible: false, toneHudPosition: 'tl', toneHudSize: 0.5, fpsVisible: false, fretDividersVisible: true, slideArrowApproachVisible: true, slideArrowNeckVisible: true, slideArrowChainPreviewVisible: true, hitFx: 0.7, cinematic: true, verdictMarks: true, timingFx: true, streakFx: true, bloom: true };
+    const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true, palette: 'default', bgTheme: 'default', hwTheme: 'default', showFretOnNote: true, fretNumberGhostScope: 'chords', cameraSmoothing: 0.5, zoomSmoothing: 0.5, tiltSmoothing: 0.5, cameraLockLow: false, cameraLockZoom: 0.5, cameraMode: 'lookahead', nutHeadstockVisible: true, tuningLabelsVisible: true, nutColor: '#f5f3f0', headstockColor: '#d4b48a', textSize: 0.5, vibrancy: 0.85, glow: 0.25, customImageDataUrl: '', customImageName: '', customVideoName: '', chordDiagramVisible: true, chordDiagramSize: 0.5, chordDiagramPosition: 'tl', fretColumnMarkerCadence: 1, projectionVisible: true, inlayLabelsVisible: false, sectionLabelsOnHighway: false, sectionHudVisible: false, sectionHudPosition: 'tr', sectionHudSize: 0.5, toneHudVisible: false, toneHudPosition: 'tl', toneHudSize: 0.5, fpsVisible: false, fretDividersVisible: true, slideArrowApproachVisible: true, slideArrowNeckVisible: true, slideArrowChainPreviewVisible: true, hitFx: 0.7, sparks: true, cinematic: true, verdictMarks: true, timingFx: true, streakFx: true, bloom: true };
     // User-selectable, persistable bg styles — must mirror settings.html's
     // VALID_STYLES. 'venue' is deliberately NOT here: it is an internal effective
     // style reached only via _venueSceneOverride (the viz-picker Venue flow), so
@@ -2115,7 +2115,7 @@
     // means (fall back to default rather than silently flipping to
     // false). Add new boolean keys to BG_DEFAULTS and they pick this
     // up via the dispatch below.
-    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible', 'projectionVisible', 'chordDiagramVisible', 'fpsVisible', 'toneHudVisible', 'fretDividersVisible', 'slideArrowApproachVisible', 'slideArrowNeckVisible', 'slideArrowChainPreviewVisible', 'cinematic', 'verdictMarks', 'timingFx', 'streakFx', 'bloom']);
+    const _BG_BOOL_KEYS = new Set(['reactive', 'showFretOnNote', 'cameraLockLow', 'inlayLabelsVisible', 'sectionLabelsOnHighway', 'sectionHudVisible', 'nutHeadstockVisible', 'tuningLabelsVisible', 'projectionVisible', 'chordDiagramVisible', 'fpsVisible', 'toneHudVisible', 'fretDividersVisible', 'slideArrowApproachVisible', 'slideArrowNeckVisible', 'slideArrowChainPreviewVisible', 'sparks', 'cinematic', 'verdictMarks', 'timingFx', 'streakFx', 'bloom']);
     function _bgCoerceBool(val, fallback) {
         if (val === 'true' || val === '1') return true;
         if (val === 'false' || val === '0') return false;
@@ -2260,6 +2260,7 @@
     window.h3dBgSetVibrancy = (v) => _bgWriteGlobal('vibrancy', v);
     window.h3dBgSetGlow     = (v) => _bgWriteGlobal('glow', v);
     window.h3dBgSetHitFx        = (v) => _bgWriteGlobal('hitFx', v);
+    window.h3dBgSetSparks       = (v) => _bgWriteGlobal('sparks', !!v);
     window.h3dBgSetCinematic    = (v) => _bgWriteGlobal('cinematic', !!v);
     window.h3dBgSetVerdictMarks = (v) => _bgWriteGlobal('verdictMarks', !!v);
     window.h3dBgSetTimingFx     = (v) => _bgWriteGlobal('timingFx', !!v);
@@ -3559,6 +3560,7 @@
         let vibrancy            = BG_DEFAULTS.vibrancy;
         let glowMul             = BG_DEFAULTS.glow;
         let _hitFx              = BG_DEFAULTS.hitFx;
+        let _sparks             = BG_DEFAULTS.sparks;
         let _cinematic          = BG_DEFAULTS.cinematic;
         let _verdictMarks       = BG_DEFAULTS.verdictMarks;
         let _timingFx           = BG_DEFAULTS.timingFx;
@@ -7382,6 +7384,7 @@
             vibrancy             = _bgReadSetting(panelKey, 'vibrancy');
             glowMul              = _bgReadSetting(panelKey, 'glow');
             _hitFx               = _bgReadSetting(panelKey, 'hitFx');
+            _sparks              = _bgReadSetting(panelKey, 'sparks');
             _cinematic           = _bgReadSetting(panelKey, 'cinematic');
             _verdictMarks        = _bgReadSetting(panelKey, 'verdictMarks');
             _timingFx            = _bgReadSetting(panelKey, 'timingFx');
@@ -12900,7 +12903,7 @@
                         if (_vAlpha > _ndHitFlash) _ndHitFlash = _vAlpha;
                         _hitPunch = 1 + 0.22 * _hitFx * _vAlpha;   // #3 scale-punch (biggest at strike, eases)
                         if (_verdictMarks) { const _tc = _timingHex(_ndMatchedMark && _ndMatchedMark.timingState); _ndLabels.push({ x, y: y + NH * 1.7, z: noteZ + 0.02, labels: [{ text: '✓', color: '#' + _tc.toString(16).padStart(6, '0') }] }); }  // #6 + #5
-                        if (_hitFx > 0 && _vAlpha > 0.5) {
+                        if (_sparks && _hitFx > 0 && _vAlpha > 0.5) {
                             const _spk = s + '|' + n.f + '|' + n.t.toFixed(2);
                             if (!(_sparkSeen.get(_spk) > now)) {
                                 _sparkSeen.set(_spk, now + 1.0);
