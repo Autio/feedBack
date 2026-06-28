@@ -126,32 +126,116 @@
                 return renderMidiPanel(inst);
             }
 
-            // Guitar/bass: show the audio source (audio-input) and launch the
-            // note_detect Calibration Wizard for the deep work.
+            // Guitar/bass: show the audio source (audio-input), a live "we can
+            // hear you" meter, then launch the note_detect Calibration Wizard for
+            // the deep work.
             async function renderAudioPanel(inst) {
                 const { sources, selected } = await _audioSources();
                 const opts2 = sources.map((s) =>
                     '<option value="' + esc(s.logicalSourceKey || s.sourceId || '') + '"' + (s.selected ? ' selected' : '') + '>' + esc(s.label || 'Input') + '</option>').join('');
                 const hasDetector = !!(window.noteDetect && typeof window.noteDetect.launchCalibration === 'function');
+                // The live-meter gate needs the detector to expose its input level
+                // (getInputLevel) and the enable/disable capture lifecycle. When any
+                // is missing (older detector / none) we degrade to the prior
+                // calibrate-only flow rather than show a meter we can't feed.
+                const nd = window.noteDetect;
+                const canMeter = !!(hasDetector && nd
+                    && typeof nd.getInputLevel === 'function'
+                    && typeof nd.enable === 'function'
+                    && typeof nd.disable === 'function'
+                    && typeof nd.isEnabled === 'function'
+                    && sources.length);
                 const body =
-                    '<p class="text-sm text-fb-textDim">Pick your audio input, then run the calibration to set levels, channel and latency.</p>' +
+                    '<p class="text-sm text-fb-textDim">Pick your audio input, then ' +
+                    (canMeter ? 'play a note so we can confirm we hear it — then calibrate or continue.' : 'run the calibration to set levels, channel and latency.') + '</p>' +
                     (sources.length
                         ? '<label class="block text-xs uppercase tracking-wider text-fb-textDim mt-3 mb-1">Audio input</label>' +
                           '<select data-is-audio class="w-full bg-gray-800/50 border border-gray-700 rounded-md px-2 py-1.5 text-sm text-fb-text outline-none">' + opts2 + '</select>'
                         : '<p class="text-sm text-fb-accent mt-2">No audio input detected yet — plug in your interface, or skip and set this up later.</p>') +
+                    (canMeter
+                        ? '<div class="mt-3"><button type="button" data-is-test class="text-sm text-fb-primary hover:text-fb-primaryHi">Test input</button>' +
+                          '<div data-is-meter-wrap class="hidden mt-2">' +
+                          '<div class="h-2 w-full bg-gray-800 rounded overflow-hidden"><div data-is-meter class="h-full w-0 bg-fb-primary" style="transition:width 80ms linear"></div></div>' +
+                          '<p data-is-test-msg class="text-sm text-fb-textDim mt-1.5">Play your ' + esc(String(INSTRUMENTS[inst].label).toLowerCase()) + ' — waiting for signal…</p></div></div>'
+                        : '') +
                     (hasDetector ? '' : '<p class="text-xs text-fb-textDim mt-3">The note detector isn’t loaded here — you can calibrate later from the player.</p>');
-                const foot =
-                    '<button type="button" data-is-cal class="bg-fb-primary hover:bg-fb-primaryHi text-white px-5 py-2 rounded-md font-medium">' +
-                    (hasDetector ? 'Calibrate' : 'Continue') + '</button>';
+                // canMeter: a gated "Continue" (enabled once we hear you) PLUS an
+                // always-enabled "Calibrate" — never gate Calibrate, since it's the
+                // tool that fixes a too-low input that produces no signal.
+                const foot = canMeter
+                    ? '<button type="button" data-is-cal class="border border-gray-600 hover:border-gray-400 text-fb-text px-4 py-2 rounded-md font-medium mr-2">Calibrate</button>' +
+                      '<button type="button" data-is-cont disabled class="bg-fb-primary hover:bg-fb-primaryHi disabled:opacity-40 text-white px-5 py-2 rounded-md font-medium">Continue</button>'
+                    : '<button type="button" data-is-cal class="bg-fb-primary hover:bg-fb-primaryHi text-white px-5 py-2 rounded-md font-medium">' +
+                      (hasDetector ? 'Calibrate' : 'Continue') + '</button>';
                 shell(inst, body, foot);
 
                 const sel = host.querySelector('[data-is-audio]');
                 const commitAudio = (key) => {
-                    if (!capabilities || !key) return;
-                    capabilities.command('audio-input', 'select-source', { requester: 'input_setup', payload: { logicalSourceKey: key } }).catch(() => {});
+                    if (!capabilities || !key) return Promise.resolve();
+                    // Awaitable: the meter must reopen on the *committed* selection,
+                    // so callers can sequence enable() after the choice persists.
+                    return capabilities.command('audio-input', 'select-source', { requester: 'input_setup', payload: { logicalSourceKey: key } }).catch(() => {});
                 };
+
+                // ── live "we can hear you" meter ────────────────────────────────
+                const meterWrap = host.querySelector('[data-is-meter-wrap]');
+                const meterBar = host.querySelector('[data-is-meter]');
+                const testMsg = host.querySelector('[data-is-test-msg]');
+                const contBtn = host.querySelector('[data-is-cont]');
+                // Idle hiss sits well under this; a plucked string clears it easily.
+                const SIGNAL_THRESHOLD = 0.04;
+                let pollTimer = null;
+                let testing = false;
+                let weEnabled = false; // did WE turn detection on (so we restore it)?
+                let handingOff = false; // Calibrate owns the capture from here on
+
+                function stopPoll() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+                function resetGate() {
+                    if (contBtn) contBtn.disabled = true;
+                    _markDone(inst, false);
+                    if (meterBar) meterBar.style.width = '0%';
+                    if (testMsg) testMsg.textContent = 'Play your ' + String(INSTRUMENTS[inst].label).toLowerCase() + ' — waiting for signal…';
+                }
+                function startPoll() {
+                    stopPoll();
+                    let heard = 0;
+                    pollTimer = setInterval(() => {
+                        let lvl = 0;
+                        try { lvl = (nd.getInputLevel() || {}).level || 0; } catch (_) { lvl = 0; }
+                        if (meterBar) meterBar.style.width = Math.min(100, Math.round(lvl * 140)) + '%';
+                        if (lvl >= SIGNAL_THRESHOLD) {
+                            // Require two consecutive ticks so a single click/pop
+                            // doesn't false-pass the gate.
+                            if (++heard >= 2 && contBtn && contBtn.disabled) {
+                                if (testMsg) testMsg.innerHTML = '<span class="text-fb-primary font-semibold">✓ We can hear you</span> — your input is working.';
+                                contBtn.disabled = false;
+                                _markDone(inst, true);
+                            }
+                        } else { heard = 0; }
+                    }, 100);
+                }
+                async function startTest() {
+                    stopPoll();
+                    resetGate();
+                    if (meterWrap) meterWrap.classList.remove('hidden');
+                    // Persist the shown choice, THEN (re)open it: enable() is a no-op
+                    // when detection is already on, so a device change while testing
+                    // must cycle disable→enable or the meter would read the stale
+                    // device — false confidence, the exact bug this gate prevents.
+                    await commitAudio(sel.value);
+                    try {
+                        if (nd.isEnabled()) { await nd.disable(); await nd.enable(); weEnabled = false; }
+                        else { await nd.enable(); weEnabled = true; }
+                    } catch (_) { /* fail-soft: meter just won't move; Calibrate still works */ }
+                    testing = true;
+                    startPoll();
+                }
+
                 if (sel) {
-                    sel.addEventListener('change', () => commitAudio(sel.value));
+                    sel.addEventListener('change', async () => {
+                        if (testing) { await startTest(); }
+                        else { await commitAudio(sel.value); resetGate(); }
+                    });
                     // The <select> shows its first option by default, but no `change`
                     // fires for that implicit pick — so on a first run with nothing yet
                     // selected, audio-input would calibrate against the wrong/no source.
@@ -159,10 +243,27 @@
                     // one calibrated (idempotent if it was already selected).
                     if (!selected) commitAudio(sel.value);
                 }
+                const testBtn = host.querySelector('[data-is-test]');
+                if (testBtn) testBtn.addEventListener('click', () => { startTest(); });
+                if (contBtn) contBtn.addEventListener('click', () => advance(inst, true));
+                // Restore detection state on ANY exit (Continue / Skip), unless we've
+                // handed the capture off to the Calibration Wizard, which owns it.
+                _activeCleanup = () => {
+                    stopPoll();
+                    testing = false;
+                    if (weEnabled && !handingOff) { try { nd.disable(); } catch (_) {} }
+                    weEnabled = false;
+                };
+
                 // Tell the tuner tables / note_detect which instrument this is.
                 try { fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instrument: inst }) }); } catch (_) {}
 
                 host.querySelector('[data-is-cal]').addEventListener('click', () => {
+                    // Hand the (possibly already-open) capture to the Calibration
+                    // Wizard — it calls enable() itself and manages teardown — so our
+                    // cleanup must not disable detection out from under it.
+                    handingOff = true;
+                    stopPoll();
                     if (hasDetector) {
                         // Hide our own full-screen overlay while note_detect's
                         // Calibration Wizard runs on top. That wizard goes
@@ -182,7 +283,15 @@
                         window.noteDetect.launchCalibration({
                             instrument: inst,
                             onDone: () => { restore(); advance(inst, true); },
-                            onCancel: () => { restore(); /* stay on this panel; user can skip or retry */ },
+                            onCancel: () => {
+                                restore();
+                                // Back on this panel: reclaim cleanup ownership so a
+                                // later Skip/Continue still restores detection state.
+                                // The wizard's enable() may have left detection on; if
+                                // we didn't turn it on ourselves, leave it as-is.
+                                handingOff = false;
+                                if (nd && typeof nd.isEnabled === 'function') { try { weEnabled = weEnabled && nd.isEnabled(); } catch (_) {} }
+                            },
                         });
                     } else {
                         advance(inst, true);
