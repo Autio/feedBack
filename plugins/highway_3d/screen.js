@@ -1692,16 +1692,25 @@
     // the Target dropdown — never on a per-frame label re-report, which would
     // flicker the <select>.
     let _aspectPanesDirty = true;
+    // Monotonic counter for the per-instance fallback key (when a pane has no
+    // arrangement name to key by).
+    let _aspectPaneCounter = 0;
     function _aspectNowMs() {
         try { return (performance && performance.now) ? performance.now() : 0; } catch (e) { return 0; }
     }
-    // Human label for a slot key: "Main", or "Panel N" (+ " — Arrangement").
-    function _aspectPaneLabel(paneKey, arrangement) {
-        let base;
-        if (paneKey === 'main') { base = 'Main'; }
-        else { const n = parseInt(paneKey.slice(5), 10); base = 'Panel ' + ((isFinite(n) ? n : 0) + 1); }
+    // Pane key: prefer the arrangement name ('arr:Bass') so a pane's framing is
+    // stable across songs AND distinct between split panes, with no dependency on
+    // the external splitscreen panel index (which isn't always available). Fall
+    // back to a per-instance id ('pane:3') when there's no arrangement.
+    function _aspectPaneKey(arrangement, uid) {
         const a = (typeof arrangement === 'string') ? arrangement.trim() : '';
-        return a ? (base + ' — ' + a) : base;
+        return a ? ('arr:' + a) : ('pane:' + uid);
+    }
+    // Human label derived from the key.
+    function _aspectPaneLabel(paneKey) {
+        if (paneKey.slice(0, 4) === 'arr:') return paneKey.slice(4);
+        if (paneKey.slice(0, 5) === 'pane:') return 'Pane ' + paneKey.slice(5);
+        return paneKey;
     }
 
     // Get-or-create the shared bridge object, seeded from defaults + localStorage.
@@ -1722,10 +1731,17 @@
         try {
             const t = _aspectTune(), out = {};
             Object.keys(_ASPECT_DEFAULTS).forEach((k) => { out[k] = t[k]; });
-            // Persist per-pane overrides too. Keys are durable split slots
-            // ('main' | 'panel<idx>'), a bounded set, so a pane's framing carries
-            // over when the user leaves a song and opens another in the same slot.
-            if (t.__panels) out.__panels = t.__panels;
+            // Persist per-pane overrides keyed by arrangement ('arr:*') only, so a
+            // pane's framing carries across songs. Instance-id fallback keys
+            // ('pane:*') are session-only — persisting them would leak a new key
+            // every reload.
+            if (t.__panels) {
+                const p = {}; let any = false;
+                Object.keys(t.__panels).forEach((k) => {
+                    if (k.slice(0, 4) === 'arr:') { p[k] = t.__panels[k]; any = true; }
+                });
+                if (any) out.__panels = p;
+            }
             localStorage.setItem(_ASPECT_LS, JSON.stringify(out));
         } catch (e) {}
     }
@@ -1741,13 +1757,12 @@
         return out;
     }
     // Record a live pane so the Target dropdown can list it. Called every frame
-    // by each renderer with its stable pane key + arrangement. `seen` is
-    // refreshed each call for pruning; the dropdown is only marked dirty when a
-    // pane is newly added or its label first resolves — not on every re-report,
-    // which would flicker the <select>.
-    function _aspectRegisterPane(paneKey, arrangement) {
+    // by each renderer with its pane key. `seen` is refreshed each call for
+    // pruning; the dropdown is only marked dirty when a pane is newly added — not
+    // on every re-report, which would flicker the <select>.
+    function _aspectRegisterPane(paneKey) {
         const reg = window.__h3dAspectPanes || (window.__h3dAspectPanes = {});
-        const label = _aspectPaneLabel(paneKey, arrangement);
+        const label = _aspectPaneLabel(paneKey);
         let e = reg[paneKey];
         if (!e) { e = reg[paneKey] = { label, seen: 0 }; _aspectPanesDirty = true; }
         else if (e.label !== label) { e.label = label; _aspectPanesDirty = true; }
@@ -3918,14 +3933,11 @@
         // __h3dAspectTune edits) without waiting for a resize. 0 until first
         // applySize().
         let _paneAspect = 0;
-        // Latched split-slot key for the wide-pane tuner ('main' | 'panel<idx>').
-        // Keyed by the durable split slot (via _bgPanelKey) so a pane's overrides
-        // persist across songs — the same slot means the same pane to the user.
-        // Latched to the last real slot so a transient null from panelIndexFor
-        // during a song/layout transition doesn't momentarily flip it to 'main'
-        // and drop the override for a frame. Reset in destroy() for instance
-        // reuse in a different slot.
-        let _paneKeyCached = '';
+        // Per-instance fallback id for the wide-pane tuner's pane key, used only
+        // when this pane has no arrangement name to key by. Assigned once in
+        // init(); overrides keyed off arrangement persist across songs, this
+        // fallback is session-only.
+        let _paneUid = 0;
         // True once applySize() has pinned the .h3d-wrap overlay to the
         // highway canvas's offset box. Stays false while the canvas has no
         // layout yet (init() can run before #highway has a real box, where
@@ -14387,10 +14399,9 @@
             // effectiveVfov returns the base vertical fov and cam.fov is restored
             // to it. The fov write is guarded on an actual change so a steady pane
             // costs nothing.
-            const _pk0 = _bgPanelKey(highwayCanvas);
-            if (_pk0 !== 'main') _paneKeyCached = _pk0;   // latch the real slot; ignore transient nulls
-            const _paneKey = _paneKeyCached || _pk0;
-            _aspectRegisterPane(_paneKey, bundle && bundle.songInfo && bundle.songInfo.arrangement);
+            const _paneKey = _aspectPaneKey(
+                bundle && bundle.songInfo && bundle.songInfo.arrangement, _paneUid);
+            _aspectRegisterPane(_paneKey);
             const _aspTune = _resolveTuneFor(_paneKey);
             const _aspActive = !!(_aspTune && _aspTune.enabled
                 && !(_aspTune.splitOnly && !_ssActive()));
@@ -14842,6 +14853,7 @@
                 }
                 _destroyed = _isReady = false;
                 _isFocused = true;
+                if (!_paneUid) _paneUid = ++_aspectPaneCounter;   // fallback pane id (no-arrangement panes)
                 _registerAspectAbShortcut();   // session-global tuner shortcut (self-guarded)
                 const myToken = ++_initToken;
                 highwayCanvas = canvas;
@@ -15262,7 +15274,6 @@
                 _lastHwW = 0; _lastHwH = 0;
                 _appliedW = 0; _appliedH = 0;
                 _paneAspect = 0;
-                _paneKeyCached = '';
                 if (cam && cam.fov !== BASE_VFOV) { cam.fov = BASE_VFOV; cam.updateProjectionMatrix(); }
                 _wrapPinned = false;
                 _unsubscribeFocus(); teardown();

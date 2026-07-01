@@ -170,25 +170,31 @@ test('a Target select and pane registry drive the per-pane picker', () => {
         'the panel must build a Target <select>');
     assert.match(src, /function\s+_aspectRegisterPane\s*\(/,
         '_aspectRegisterPane must record live panes for the picker');
-    assert.match(src, /_aspectRegisterPane\(\s*_paneKey\s*,/,
+    assert.match(src, /_aspectRegisterPane\(\s*_paneKey\s*\)/,
         'camUpdate must register its pane each frame');
 });
 
-test('panes are keyed by the durable split slot and the key is latched', () => {
-    // Slot keys ('main' | 'panel<idx>') persist across songs, so a pane's
-    // overrides carry over. The key is latched to the last real slot so a
-    // transient null from panelIndexFor doesn't flip it to 'main' for a frame.
-    assert.match(src, /const\s+_pk0\s*=\s*_bgPanelKey\(\s*highwayCanvas\s*\)\s*;/,
-        'camUpdate must derive the slot key from _bgPanelKey(highwayCanvas)');
-    assert.match(src, /if\s*\(\s*_pk0\s*!==\s*'main'\s*\)\s*_paneKeyCached\s*=\s*_pk0\s*;[\s\S]*?const\s+_paneKey\s*=\s*_paneKeyCached\s*\|\|\s*_pk0\s*;/,
-        'camUpdate must latch the last real slot key');
-});
-
-test('per-pane overrides persist to localStorage (carry across songs)', () => {
+test('panes are keyed by arrangement (stable across songs, no split-API dep)', () => {
+    // 'arr:<name>' keys are distinct between split panes AND stable across
+    // songs, without depending on the external splitscreen panel index (which
+    // isn't always available). A per-instance id is the no-arrangement fallback.
     assert.match(
         src,
-        /function\s+_aspectPersist\s*\(\)[\s\S]*?if\s*\(\s*t\.__panels\s*\)\s*out\.__panels\s*=\s*t\.__panels/,
-        '_aspectPersist must include __panels so per-slot overrides survive a reload / song change',
+        /function\s+_aspectPaneKey\s*\(\s*arrangement\s*,\s*uid\s*\)[\s\S]*?'arr:'\s*\+\s*a[\s\S]*?'pane:'\s*\+\s*uid/,
+        '_aspectPaneKey must prefer arr:<name> and fall back to pane:<uid>',
+    );
+    assert.match(
+        src,
+        /const\s+_paneKey\s*=\s*_aspectPaneKey\(\s*[\s\S]*?songInfo[\s\S]*?arrangement\s*,\s*_paneUid\s*\)\s*;/,
+        'camUpdate must key the pane by arrangement (with the uid fallback)',
+    );
+});
+
+test('arrangement-keyed overrides persist; instance-id keys stay session-only', () => {
+    assert.match(
+        src,
+        /function\s+_aspectPersist\s*\(\)[\s\S]*?k\.slice\(0,\s*4\)\s*===\s*'arr:'[\s\S]*?out\.__panels\s*=\s*p/,
+        '_aspectPersist must persist only arr:* overrides so they carry across songs',
     );
 });
 
