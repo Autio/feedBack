@@ -4677,10 +4677,12 @@
         // the full look (re-enable the rail bloom) per browser, no rebuild:
         //   localStorage.h3d_full_sus = '1'   // re-enable rail bloom halo
         //   delete localStorage.h3d_full_sus  // back to lean default
-        // Read once per frame at the top of update() so the flag takes effect
-        // live. The bloom pool/material/gaussian texture are kept intact
+        // Polled at ~1 Hz at the top of update() (perf: localStorage reads
+        // are synchronous) so the console flag still takes effect live.
+        // The bloom pool/material/gaussian texture are kept intact
         // (still pinned by the bloom unit tests and used by the opt-out path).
         let _leanSus = true;
+        let _leanSusPollCounter = 0;
 
         // Lifecycle flags
         let _isReady = false;
@@ -6250,6 +6252,12 @@
             return boxH;
         }
 
+        // Lyrics layout cache — measureText per syllable + row wrapping
+        // only changes when the displayed line(s), font size, or canvas
+        // width change, not per frame. Keyed below; the per-frame work is
+        // just drawing over the cached widths.
+        let _lyrRowsCache = null;
+
         function drawLyrics(lyrics, currentTime, ctx, W, H) {
             if (!lyrics._lines) {
                 const lines = [];
@@ -6297,37 +6305,51 @@
             const sylText = s => { const t = s.w || ''; return (t.endsWith('+') || t.endsWith('-')) ? t.slice(0, -1) : t; };
 
             ctx.font = `bold ${fontSize}px sans-serif`;
-            const spaceWidth = ctx.measureText(' ').width;
-            const maxWidth = W * 0.8;
+            let rows, spaceWidth, bgWidth;
+            const _lc = _lyrRowsCache;
+            if (_lc && _lc.lyricsRef === lyrics && _lc.idx === currentIdx
+                && _lc.shown === linesToShow.length
+                && _lc.fontSize === fontSize && _lc.W === W) {
+                rows = _lc.rows; spaceWidth = _lc.spaceWidth; bgWidth = _lc.bgWidth;
+            } else {
+                spaceWidth = ctx.measureText(' ').width;
+                const maxWidth = W * 0.8;
 
-            const rows = [];
-            for (const authoredLine of linesToShow) {
-                let row = [], rowWidth = 0;
-                for (const wordSyls of authoredLine.words) {
-                    const parts = [];
-                    let wordWidth = 0;
-                    for (const s of wordSyls) {
-                        const text = sylText(s);
-                        const w = ctx.measureText(text).width;
-                        parts.push({ syl: s, text, width: w });
-                        wordWidth += w;
+                rows = [];
+                for (const authoredLine of linesToShow) {
+                    let row = [], rowWidth = 0;
+                    for (const wordSyls of authoredLine.words) {
+                        const parts = [];
+                        let wordWidth = 0;
+                        for (const s of wordSyls) {
+                            const text = sylText(s);
+                            const w = ctx.measureText(text).width;
+                            parts.push({ syl: s, text, width: w });
+                            wordWidth += w;
+                        }
+                        const advance = wordWidth + spaceWidth;
+                        if (row.length > 0 && rowWidth + advance > maxWidth) { rows.push(row); row = []; rowWidth = 0; }
+                        row.push({ parts, advance });
+                        rowWidth += advance;
                     }
-                    const advance = wordWidth + spaceWidth;
-                    if (row.length > 0 && rowWidth + advance > maxWidth) { rows.push(row); row = []; rowWidth = 0; }
-                    row.push({ parts, advance });
-                    rowWidth += advance;
+                    if (row.length) rows.push(row);
                 }
-                if (row.length) rows.push(row);
+
+                bgWidth = 0;
+                for (const row of rows) {
+                    const rw = row.reduce((s, w) => s + w.advance, 0) - spaceWidth;
+                    if (rw > bgWidth) bgWidth = rw;
+                }
+                bgWidth = Math.min(bgWidth + 30, W * 0.85);
+                _lyrRowsCache = {
+                    lyricsRef: lyrics, idx: currentIdx,
+                    shown: linesToShow.length, fontSize, W,
+                    rows, spaceWidth, bgWidth,
+                };
             }
 
             const rowHeight = fontSize + 6;
             const totalHeight = rows.length * rowHeight + 10;
-            let bgWidth = 0;
-            for (const row of rows) {
-                const rw = row.reduce((s, w) => s + w.advance, 0) - spaceWidth;
-                if (rw > bgWidth) bgWidth = rw;
-            }
-            bgWidth = Math.min(bgWidth + 30, W * 0.85);
 
             ctx.fillStyle = 'rgba(0,0,0,0.7)';
             ctx.beginPath();
@@ -9958,10 +9980,14 @@
             // Lean sustain rendering is the default (see declaration above):
             // the trail/ribbon outline always draws; only the additive rail
             // bloom halo is dropped. The full look (with bloom) is an opt-out.
-            // Cheap per-frame read so the console flag takes effect live.
-            try {
-                _leanSus = localStorage.getItem('h3d_full_sus') !== '1';
-            } catch (_) { _leanSus = true; }
+            // localStorage.getItem is a synchronous storage read — polled at
+            // ~1 Hz instead of every frame; the console flag still takes
+            // effect live (within a second).
+            if ((_leanSusPollCounter++ % 60) === 0) {
+                try {
+                    _leanSus = localStorage.getItem('h3d_full_sus') !== '1';
+                } catch (_) { _leanSus = true; }
+            }
             // Materialize the text-size multiplier from the user's slider.
             // textSize ∈ [0,1]; _textSizeMul ∈ [0.5, 1.5] with 0.5 ↦ 1.0×
             // so default behaviour matches what the renderer did pre-slider.

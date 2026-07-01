@@ -746,103 +746,121 @@ function createHighway() {
     // on the freshly-mounted canvas.
     let _currentCanvasContextType = '2d';
 
+    // One persistent bundle object per createHighway() instance —
+    // _makeBundle() mutates its fields in place each call instead of
+    // allocating a fresh ~35-field object per rAF frame (steady GC churn
+    // on weak hardware, ×N under splitscreen). Consequences for
+    // consumers: the bundle OBJECT's identity is stable across frames
+    // and carries no meaning; its field values are only valid for the
+    // duration of the current draw call. Array fields (`notes`,
+    // `chords`, `handShapes`, `chordTemplates`, ...) still swap
+    // reference whenever chart data changes — field-identity caches
+    // (e.g. highway_3d's merge caches) rely on that invariant.
+    const _bundleReused = {};
+
     function _makeBundle() {
         // Snapshot of current factory state passed to each renderer call.
-        // Arrays and songInfo are LIVE references, not copies — the bundle
-        // itself is rebuilt each frame but its `notes`, `chords`,
-        // `anchors`, `beats`, etc. point at closure state. Renderers
-        // MUST NOT mutate these; treat them as read-only. We don't
-        // Object.freeze or deep-copy for per-frame allocation cost reasons.
-        return {
-            // Timing
-            currentTime,
-            songInfo,
-            isReady: ready,
-            // True while the chart clock is actively advancing; false when
-            // audio is paused / stalled / mid-seek (setTime has kept getting
-            // the same t for > _CHART_MAX_INTERP_MS). This is the same
-            // predicate getTime() uses to decide raw-vs-interpolated, and the
-            // no-anchor boot state reads as not-playing — matching getTime()
-            // returning raw chartTime there. Renderers that run their own
-            // sub-frame clock (highway_3d's smoothNow) gate on this to fall
-            // back to raw instead of extrapolating forward against a frozen
-            // audio sample. Undefined on downlevel hosts → those renderers
-            // keep their own staleness-based fallback.
-            isPlaying: !Number.isNaN(_chartAnchorPerfNow)
-                && (performance.now() - _chartLastAdvanceAt) <= _CHART_MAX_INTERP_MS,
+        // Arrays and songInfo are LIVE references, not copies — the
+        // bundle's `notes`, `chords`, `anchors`, `beats`, etc. point at
+        // closure state. Renderers MUST NOT mutate these; treat them as
+        // read-only. We don't Object.freeze or deep-copy for per-frame
+        // cost reasons.
+        const b = _bundleReused;
+        // Timing
+        b.currentTime = currentTime;
+        b.songInfo = songInfo;
+        b.isReady = ready;
+        // True while the chart clock is actively advancing; false when
+        // audio is paused / stalled / mid-seek (setTime has kept getting
+        // the same t for > _CHART_MAX_INTERP_MS). This is the same
+        // predicate getTime() uses to decide raw-vs-interpolated, and the
+        // no-anchor boot state reads as not-playing — matching getTime()
+        // returning raw chartTime there. Renderers that run their own
+        // sub-frame clock (highway_3d's smoothNow) gate on this to fall
+        // back to raw instead of extrapolating forward against a frozen
+        // audio sample. Undefined on downlevel hosts → those renderers
+        // keep their own staleness-based fallback.
+        b.isPlaying = !Number.isNaN(_chartAnchorPerfNow)
+            && (performance.now() - _chartLastAdvanceAt) <= _CHART_MAX_INTERP_MS;
 
-            // Chart content (filter-aware — difficulty-filtered arrays
-            // preferred; raw arrays are the fallback when no ladder data).
-            notes: _filteredNotes !== null ? _filteredNotes : notes,
-            chords: _filteredChords !== null ? _filteredChords : chords,
-            anchors: _filteredAnchors !== null ? _filteredAnchors : anchors,
-            beats,
-            sections,
-            chordTemplates,
-            stringCount,
-            // Mirrors song_info tuning capo offsets (±semitones from the
-            // instrument’s standard open-string layout). Live reference.
-            tuning: songInfo?.tuning,
-            capo: songInfo?.capo,
-            lyrics,
-            lyricsSource,
-            toneChanges,
-            toneBase,
-            // Drum tab payload (or null when the active arrangement has
-            // no drum_tab). Live reference — renderers MUST treat as
-            // read-only. Plugins should prefer this over decoding the
-            // standard `notes` stream when present; absence is the
-            // signal to fall back to legacy MIDI-encoded drums.
-            drumTab,
+        // Chart content (filter-aware — difficulty-filtered arrays
+        // preferred; raw arrays are the fallback when no ladder data).
+        b.notes = _filteredNotes !== null ? _filteredNotes : notes;
+        b.chords = _filteredChords !== null ? _filteredChords : chords;
+        b.anchors = _filteredAnchors !== null ? _filteredAnchors : anchors;
+        b.beats = beats;
+        b.sections = sections;
+        b.chordTemplates = chordTemplates;
+        b.stringCount = stringCount;
+        // Mirrors song_info tuning capo offsets (±semitones from the
+        // instrument’s standard open-string layout). Live reference.
+        b.tuning = songInfo?.tuning;
+        b.capo = songInfo?.capo;
+        b.lyrics = lyrics;
+        b.lyricsSource = lyricsSource;
+        b.toneChanges = toneChanges;
+        b.toneBase = toneBase;
+        // Drum tab payload (or null when the active arrangement has
+        // no drum_tab). Live reference — renderers MUST treat as
+        // read-only. Plugins should prefer this over decoding the
+        // standard `notes` stream when present; absence is the
+        // signal to fall back to legacy MIDI-encoded drums.
+        b.drumTab = drumTab;
 
-            // Master-difficulty (feedBack#48)
-            mastery: _mastery,
-            hasPhraseData: !!(_phrases && _phrases.length > 0),
-            // When phrase data authored ANY handshape, respect the filtered
-            // list strictly (even when this difficulty leaves it empty) —
-            // otherwise low-mastery levels would surface arp hints that
-            // don't belong. Only fall back to the flat list when the
-            // phrase data carries no handshapes at all (common on DLC
-            // where handshapes ship on the arrangement root).
-            handShapes: (_filteredHandShapes !== null && _phrasesHaveHandShapes)
-                ? _filteredHandShapes
-                : handShapes,
+        // Master-difficulty (feedBack#48)
+        b.mastery = _mastery;
+        b.hasPhraseData = !!(_phrases && _phrases.length > 0);
+        // When phrase data authored ANY handshape, respect the filtered
+        // list strictly (even when this difficulty leaves it empty) —
+        // otherwise low-mastery levels would surface arp hints that
+        // don't belong. Only fall back to the flat list when the
+        // phrase data carries no handshapes at all (common on DLC
+        // where handshapes ship on the arrangement root).
+        b.handShapes = (_filteredHandShapes !== null && _phrasesHaveHandShapes)
+            ? _filteredHandShapes
+            : handShapes;
 
-            // Display flags
-            inverted: _inverted,
-            lefty: _lefty,
-            renderScale: _effectiveRenderScale(),
-            lyricsVisible: showLyrics,
-            // Teaching marks sd/ch overlay pref (§6.2.2) so custom renderers
-            // (e.g. the 3D highway) can mirror the 2D opt-in toggle. The fg
-            // finger-hint pref rides alongside (default on, independently hideable).
-            teachingMarksVisible: _showTeachingMarks,
-            fingerHintsVisible: _showFingerHints,
+        // Display flags
+        b.inverted = _inverted;
+        b.lefty = _lefty;
+        b.renderScale = _effectiveRenderScale();
+        b.lyricsVisible = showLyrics;
+        // Teaching marks sd/ch overlay pref (§6.2.2) so custom renderers
+        // (e.g. the 3D highway) can mirror the 2D opt-in toggle. The fg
+        // finger-hint pref rides alongside (default on, independently hideable).
+        b.teachingMarksVisible = _showTeachingMarks;
+        b.fingerHintsVisible = _showFingerHints;
 
-            // 2D-style helpers (renderers that don't need these can ignore).
-            // `fillTextUnmirrored` is deliberately NOT exposed here —
-            // the factory-level version writes to the default renderer's
-            // closure ctx, which is null for custom renderers. Renderers
-            // that need lefty-aware text should check `bundle.lefty` and
-            // apply the mirror transform themselves on their own context.
-            project,
-            fretX,
+        // 2D-style helpers (renderers that don't need these can ignore).
+        // `fillTextUnmirrored` is deliberately NOT exposed here —
+        // the factory-level version writes to the default renderer's
+        // closure ctx, which is null for custom renderers. Renderers
+        // that need lefty-aware text should check `bundle.lefty` and
+        // apply the mirror transform themselves on their own context.
+        b.project = project;
+        b.fretX = fretX;
+        // Windowed-iteration helpers (stable references): lower-bound
+        // binary searches so custom viz don't full-scan chart arrays per
+        // frame. lowerBoundT keys on `.t` (notes / chords); lowerBoundTime
+        // keys on `.time` (beats / anchors / sections).
+        b.lowerBoundT = bsearch;
+        b.lowerBoundTime = bsearchTime;
 
-            // Per-note judgment overlay (feedBack#254). Renderers call
-            // this per visible note / chord-note to find out whether a
-            // scorer (note_detect) has flagged it hit / actively-held /
-            // missed, so the gem itself can light up instead of relying
-            // on an overlay ring. Returns null when no provider is set
-            // or it reports nothing for this note; otherwise
-            // { state: 'hit'|'active'|'miss', alpha: 0..1, color: string|null }.
-            getNoteState: _noteState,   // stable reference — no per-frame allocation
-            // Lets custom renderers (e.g. highway_3d) tell "is a provider
-            // attached" apart from "no provider, getNoteState always
-            // returns null" — `getNoteState` always exists on the bundle
-            // so its presence alone isn't a useful "detect mode" signal.
-            // Renderers gate verdict-window cull / draw extensions on this.
-            getNoteStateProvider: _getNoteStateProvider, // stable — see above
-        };
+        // Per-note judgment overlay (feedBack#254). Renderers call
+        // this per visible note / chord-note to find out whether a
+        // scorer (note_detect) has flagged it hit / actively-held /
+        // missed, so the gem itself can light up instead of relying
+        // on an overlay ring. Returns null when no provider is set
+        // or it reports nothing for this note; otherwise
+        // { state: 'hit'|'active'|'miss', alpha: 0..1, color: string|null }.
+        b.getNoteState = _noteState;   // stable reference
+        // Lets custom renderers (e.g. highway_3d) tell "is a provider
+        // attached" apart from "no provider, getNoteState always
+        // returns null" — `getNoteState` always exists on the bundle
+        // so its presence alone isn't a useful "detect mode" signal.
+        // Renderers gate verdict-window cull / draw extensions on this.
+        b.getNoteStateProvider = _getNoteStateProvider; // stable — see above
+        return b;
     }
 
     const _defaultRenderer = {
@@ -1534,7 +1552,13 @@ function createHighway() {
     }
 
     function drawBeats(W, H) {
-        for (const beat of beats) {
+        // Window the beat scan — a long song carries thousands of beats
+        // and iterating (and projecting) all of them per frame was pure
+        // waste; project() culling stays as the safety net.
+        const lo = bsearchTime(beats, currentTime - 0.25);
+        const hi = bsearchTime(beats, currentTime + VISIBLE_SECONDS + 0.25);
+        for (let i = lo; i < hi; i++) {
+            const beat = beats[i];
             const tOff = beat.time - currentTime;
             const p = project(tOff);
             if (!p || p.scale < 0.06) continue;
@@ -2641,6 +2665,19 @@ function createHighway() {
         while (lo < hi) {
             const mid = (lo + hi) >> 1;
             if (arr[mid].t < time) lo = mid + 1;
+            else hi = mid;
+        }
+        return lo;
+    }
+    // Lower-bound binary search for `.time`-keyed arrays (beats, anchors,
+    // sections) — bsearch/bsearchChords key on `.t` and would compare
+    // against undefined here. Exposed to custom viz as
+    // bundle.lowerBoundTime.
+    function bsearchTime(arr, time) {
+        let lo = 0, hi = arr.length;
+        while (lo < hi) {
+            const mid = (lo + hi) >> 1;
+            if (arr[mid].time < time) lo = mid + 1;
             else hi = mid;
         }
         return lo;
