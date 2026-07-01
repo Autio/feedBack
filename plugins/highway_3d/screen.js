@@ -9886,6 +9886,55 @@
         }
 
         /* ── Per-frame rendering ─────────────────────────────────────────── */
+        // ── GPU pre-warm (perf: first-appearance hitches) ─────────────────
+        // Three.js compiles a material's shader program and uploads a
+        // texture the first frame the owning object renders — profiled as
+        // mid-song frame spikes (getParameters / texSubImage2D). Pay those
+        // costs during init (load spinner) instead:
+        //   _prewarmStatic()      — ren.compile() over the fully-built scene
+        //                           + deterministic label textures (fret
+        //                           numbers in every per-frame style/colour
+        //                           combo).
+        //   _prewarmChart(bundle) — chart-dependent labels (chord template
+        //                           names, section names); needs the ready
+        //                           bundle, so it runs once from the first
+        //                           draw() after each init.
+        // txtMat() rasterises into the unbounded cache these draws hit
+        // anyway; ren.initTexture() forces the GPU upload now.
+        let _chartPrewarmed = false;
+        function _prewarmTex(mat) {
+            if (mat && mat.map && ren) ren.initTexture(mat.map);
+        }
+        function _prewarmStatic() {
+            try {
+                if (ren && scene && cam) ren.compile(scene, cam);
+            } catch (e) { console.warn('[3D-Hwy] prewarm compile:', e); }
+            try {
+                for (let f = 0; f <= NFRETS; f++) {
+                    _prewarmTex(txtMat(f, FRET_LABEL_GOLD_HEX, false, 'noteFret'));
+                    _prewarmTex(txtMat(f, FRET_LABEL_GOLD_HEX, false, 'fretRow'));
+                    _prewarmTex(txtMat(f, FRET_LABEL_IDLE_HEX, false, 'fretRow'));
+                    _prewarmTex(txtMat(f, '#ffffff', false, 'ghostFret'));
+                }
+            } catch (e) { console.warn('[3D-Hwy] prewarm labels:', e); }
+        }
+        function _prewarmChart(bundle) {
+            try {
+                const tpls = bundle && bundle.chordTemplates;
+                if (Array.isArray(tpls)) {
+                    for (const tpl of tpls) {
+                        if (tpl && tpl.name) _prewarmTex(txtMat(tpl.name, '#e8d080', true, 'chord'));
+                    }
+                }
+                const secs = bundle && bundle.sections;
+                if (Array.isArray(secs)) {
+                    for (const s of secs) {
+                        if (s && s.name) _prewarmTex(txtMat(s.name, '#00cccc', true, 'section'));
+                    }
+                }
+            } catch (e) { console.warn('[3D-Hwy] prewarm chart labels:', e); }
+        }
+
         function update(bundle) {
             pbBeg(0);
             // [verdict glow] Apply the level-driven verdict brightness captured
@@ -14962,6 +15011,12 @@
                         _invertedForBoard = _invertedCached;
                         _leftyForBoard = _leftyCached;
                         if (!initScene()) { _unsubscribeFocus(); _rejectReady(new Error('initScene failed')); return; }
+                        // Pre-compile shaders + upload deterministic label
+                        // textures while the load spinner is still up; the
+                        // chart-dependent half runs on first draw() (bundle
+                        // arrays are only guaranteed populated post-ready).
+                        _prewarmStatic();
+                        _chartPrewarmed = false;
                         const sz = canvasSize(highwayCanvas);
                         // Mark ready before RAF so any resize(w,h) calls that arrive
                         // in the meantime (e.g. from sizeCanvases()) are applied directly.
@@ -15000,6 +15055,10 @@
 
             draw(bundle) {
                 if (!_isReady) return;
+                if (!_chartPrewarmed) {
+                    _chartPrewarmed = true;
+                    _prewarmChart(bundle);
+                }
                 _invertedCached = !!bundle.inverted;
                 _leftyCached = !!bundle.lefty;
                 const newNStr = resolveStringCount(bundle);
