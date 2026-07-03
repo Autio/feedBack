@@ -1759,13 +1759,57 @@
             '</div>';
     }
 
-    function _renderCardsRange(start, end) {
-        let html = '';
-        for (let i = start; i < end; i++) {
-            const s = state.songs[i];
-            html += s ? songCard(s) : _skeletonCard();
+    // Signature of the card at absolute index i: real-card vs skeleton, plus the
+    // select-mode it was built under. A change here is the ONLY reason a recycled
+    // node must be rebuilt (a hole filled after a fetch, or select mode toggled) —
+    // otherwise the node is reused as-is across window slides.
+    function _cardSig(i) {
+        return (state.songs[i] ? 'r' : 's') + (state.selectMode ? '1' : '0');
+    }
+
+    function _buildCardNode(i) {
+        const s = state.songs[i];
+        const tmp = document.createElement('div');
+        tmp.innerHTML = s ? songCard(s) : _skeletonCard();
+        const node = tmp.firstElementChild;
+        node.setAttribute('data-idx', String(i));
+        node.setAttribute('data-sig', _cardSig(i));
+        return node;
+    }
+
+    // Reconcile the grid's children to exactly cover [start, end) in ascending
+    // index order, REUSING the card nodes that stay in-window. Sliding the window
+    // one row now mutates only the row that entered/left instead of tearing down +
+    // rebuilding (+ re-wiring) the whole ~60-card window every frame — that
+    // per-slide teardown was the main-thread stall behind the "library skips every
+    // so many scrolls, up or down" report (the stall buffers held-arrow key-repeats
+    // that then flush in a burst). wireCards()'s data-wired guard wires only the
+    // freshly-built nodes.
+    function _syncWindow(grid, start, end) {
+        // Pass 1: drop nodes that left the window, are untagged, or whose content
+        // signature is stale (skeleton→real, or select-mode toggled). What remains
+        // is a reusable, correctly-rendered subset in ascending DOM order.
+        for (const el of Array.from(grid.children)) {
+            const a = el.getAttribute('data-idx');
+            const idx = a == null ? NaN : Number(a);
+            if (!(idx >= start && idx < end) || el.getAttribute('data-sig') !== _cardSig(idx)) {
+                el.remove();
+            }
         }
-        return html;
+        // Pass 2: walk [start, end) in order, reusing survivors and inserting new
+        // nodes into their correct slot; `ref` tracks the child expected next.
+        const existing = new Map();
+        for (const el of grid.children) existing.set(Number(el.getAttribute('data-idx')), el);
+        let ref = grid.firstChild;
+        for (let i = start; i < end; i++) {
+            let node = existing.get(i);
+            if (!node) node = _buildCardNode(i);
+            if (node === ref) {
+                ref = ref.nextSibling;
+            } else {
+                grid.insertBefore(node, ref);
+            }
+        }
     }
 
     // Fetch a single OFFSET page into the sparse store. Uses the stage-1 keyset
@@ -1861,7 +1905,7 @@
         }
         if (_closeCardMenu) _closeCardMenu();   // its DOM is about to be replaced
         grid.style.top = (firstRow * rowH) + 'px';
-        grid.innerHTML = _renderCardsRange(start, end);
+        _syncWindow(grid, start, end);   // recycle in-window nodes; only the entering/leaving row rebuilds
         wireCards(grid);
         decorateTuningChips(grid);   // colour tuning chips by working-tuning match (async, feature-detected)
         state.winRange = { start, end };
