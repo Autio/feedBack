@@ -38,15 +38,25 @@ def test_plugin_loader_unmounts_previous_ui_contributions_before_reregistering()
     assert "await _commandUiDomain(contribution.domain, 'mount', plugin, contribution)" in source
 
 
-def test_plugin_loader_unmounts_contributions_for_removed_plugins():
+def test_plugin_loader_does_not_treat_response_absence_as_uninstall():
+    # A plugin transiently absent from /api/plugins (the backend clears its
+    # registry at the start of load_plugins() and repopulates incrementally
+    # while HTTP stays up, so restarts serve partial responses) must NOT be
+    # torn down: the old absence sweep unmounted UI contributions and
+    # unregistered the capability participant with no re-registration path
+    # (plugin scripts don't re-run), and the DOM/style wipes forced a
+    # mid-session screen.js re-evaluation that duplicated the desktop
+    # audio_engine's native signal chain.
     source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
 
-    assert "const livePluginIds = new Set(plugins.map((plugin) => plugin.id))" in source
-    assert "for (const [pluginId, contributions] of _pluginUiContributions)" in source
-    assert "const stalePlugin = { id: pluginId }" in source
-    assert "await _commandUiDomain(contribution.domain, 'unmount', stalePlugin, contribution)" in source
-    assert "window.feedBack?.capabilities?.unregisterParticipant?.(pluginId)" in source
-    assert "_pluginUiContributions.delete(pluginId)" in source
+    # The absence-triggered sweep is gone (rationale comment in its place)...
+    assert "const livePluginIds" not in source
+    assert "const stalePlugin = { id: pluginId }" not in source
+    assert "deliberately NO stale-contribution sweep" in source
+    # ...and the DOM/style reconcilers only act on plugins the response names.
+    assert "const respondedIds = new Set(plugins.map((p) => p.id))" in source
+    assert "respondedIds.has(pid) && !alreadyHydrated.has(pid)" in source
+    assert "responded.has(id) && !styled.has(id)" in source
 
 
 
