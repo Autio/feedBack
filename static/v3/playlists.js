@@ -213,7 +213,7 @@
             '<div class="flex gap-2 shrink-0 items-center">' +
             (pl.songs.length
                 ? '<button id="v3-pl-shuffle" class="px-2 py-2 rounded-md" aria-pressed="false">' +
-                  '<svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>' +
+                  '<svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 3h5v5M4 20L21 3M21 16v5h-5M15 15l6 6M4 4l5 5"/></svg>' +
                   '</button>' +
                   '<button id="v3-pl-playall" class="bg-fb-primary hover:bg-fb-primaryHi text-white text-sm font-medium px-4 py-2 rounded-md">▶ Play ' + (isAlbum ? 'album' : 'all') + '</button>'
                 : '') +
