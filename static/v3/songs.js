@@ -949,7 +949,7 @@
             // address the local DB / filesystem). Both openers (⋮ and
             // right-click) share this list, so parity is structural.
             ...(state.provider === 'local' && song.filename ? [
-                { id: '__fixmatch', label: 'Fix match…' },
+                { id: '__fixmatch', label: 'Fix metadata…' },
                 { id: '__cover', label: 'Change cover…' },
                 { id: '__refreshmeta', label: 'Refresh metadata' },
                 { id: '__getinfo', label: 'Get info…' },

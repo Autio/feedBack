@@ -117,6 +117,19 @@ def test_api_put_get_and_clear(client, server):
     assert "artist" not in client.get("/api/song/a.archive/overrides").json()["overrides"]
 
 
+def test_api_get_returns_pack_values(client, server):
+    _put(server, "a.archive", title="Pack Title", artist="Pack Artist",
+         album="Pack Album", year="1988")
+    server.meta_db.set_song_override("a.archive", "title", value="Fixed Title")
+    body = client.get("/api/song/a.archive/overrides").json()
+    # the override rides "overrides"; the pack baseline rides "pack" (all 5 fields)
+    assert body["overrides"]["title"]["value"] == "Fixed Title"
+    assert body["pack"] == {"title": "Pack Title", "artist": "Pack Artist",
+                            "album": "Pack Album", "year": "1988", "genre": ""}
+    # a song with no row still gets an all-empty pack (popup always has values)
+    assert client.get("/api/song/ghost.archive/overrides").json()["pack"]["title"] == ""
+
+
 def test_api_rejects_unknown_field(client, server):
     _put(server, "a.archive")
     r = client.put("/api/song/a.archive/overrides",

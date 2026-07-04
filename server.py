@@ -1266,6 +1266,17 @@ class MetadataDB:
                 out.setdefault(fn, {})[field] = {"value": value, "locked": bool(locked)}
         return out
 
+    def pack_fields(self, filename: str) -> dict:
+        """The stored (pack) values for the overridable catalog fields — the
+        Fix-metadata popup shows these behind each override as the 'revert to
+        pack' reference + the Yours/Pack provenance. Empty strings for a missing
+        song so the popup always has a value to render."""
+        keys = ("title", "artist", "album", "year", "genre")
+        row = self.conn.execute(
+            "SELECT title, artist, album, year, genre FROM songs WHERE filename = ?",
+            (filename,)).fetchone()
+        return {k: ((row[i] or "") if row else "") for i, k in enumerate(keys)}
+
     def set_song_tags(self, filename: str, tags) -> list:
         """Replace ALL of a song's tags with the given set (each normalized;
         blanks + case-dupes dropped). Full-replace so the whole personal-meta
@@ -9203,9 +9214,13 @@ _OVERRIDE_FIELDS = frozenset({"title", "artist", "album", "year", "genre"})
 @app.get("/api/song/{filename:path}/overrides")
 def get_song_overrides(filename: str):
     """Per-field metadata overrides + locks for one song (Fix-metadata popup):
-    {"overrides": {field: {"value": str|null, "locked": bool}}}."""
-    return {"overrides": meta_db.get_song_overrides(
-        meta_db._canonical_song_filename(filename))}
+    {"overrides": {field: {"value": str|null, "locked": bool}},
+     "pack": {field: str}}. `pack` is the stored value each override sits on top
+    of — the popup's Details tab renders it as the revert-to-pack reference and
+    the Yours/Pack provenance."""
+    key = meta_db._canonical_song_filename(filename)
+    return {"overrides": meta_db.get_song_overrides(key),
+            "pack": meta_db.pack_fields(key)}
 
 
 @app.put("/api/song/{filename:path}/overrides")
