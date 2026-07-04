@@ -2758,6 +2758,12 @@ function goFavTreePage(p) {
 // ── Settings ─────────────────────────────────────────────────────────────
 let _defaultArrangement = '';
 
+const INSTRUMENT_PATHWAYS = ['songs', 'practice', 'learn', 'studio'];
+
+function _normalizeInstrumentPathway(value) {
+    return INSTRUMENT_PATHWAYS.includes(value) ? value : 'songs';
+}
+
 function _syncDefaultArrangementSelect(value) {
     const sel = document.getElementById('default-arrangement');
     if (!sel) return;
@@ -3410,6 +3416,8 @@ async function loadSettings() {
     if (dlcEl) dlcEl.value = data.dlc_dir || '';
     _defaultArrangement = data.default_arrangement || '';
     _syncDefaultArrangementSelect(_defaultArrangement);
+    const pathwayEl = document.getElementById('setting-instrument-pathway');
+    if (pathwayEl) pathwayEl.value = _normalizeInstrumentPathway(data.pathway);
     const demucsEl = document.getElementById('demucs-server-url');
     if (demucsEl) demucsEl.value = data.demucs_server_url || '';
     const leftyEl = document.getElementById('setting-lefty');
@@ -3901,6 +3909,18 @@ function persistSetting(key, value) {
     _settingSaveChain = next.catch(() => {});
     return next;
 }
+function setInstrumentPathway(value) {
+    const pathway = _normalizeInstrumentPathway(value);
+    const el = document.getElementById('setting-instrument-pathway');
+    if (el) el.value = pathway;
+    persistSetting('pathway', pathway).then(() => {
+        if (window.v3Badges && typeof window.v3Badges.reload === 'function') {
+            try { window.v3Badges.reload(); } catch (_) { /* noop */ }
+        }
+    });
+}
+
+
 async function _postSetting(key, value) {
     const status = document.getElementById('settings-status');
     try {
