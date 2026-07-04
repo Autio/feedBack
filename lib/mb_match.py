@@ -224,6 +224,11 @@ def _lucene_escape_phrase(s: str) -> str:
     return s.replace("\\", "\\\\").replace('"', '\\"')
 
 
+# A parenthetical/bracketed "(Live …)" marker — the live signal denoise() strips
+# from the title. Mirrors _NOISE_GROUP_RE but for the `live` term only.
+_LIVE_GROUP_RE = re.compile(r"[(\[][^)\]]*\blive\b[^)\]]*[)\]]", re.IGNORECASE)
+
+
 def build_recording_query(artist, title) -> str:
     """Lucene query for /ws/2/recording. Built from the DENOISED fields —
     the noise we strip (author credits, "(Live)", "(v2)") would otherwise
@@ -242,7 +247,13 @@ def build_recording_query(artist, title) -> str:
     # REUSE the studio recording, so filtering them would drop the very recording
     # we want (verified against MusicBrainz — `-secondarytype:Compilation` cut the
     # AC/DC studio "Highway to Hell" recording entirely).
-    if q:
+    #
+    # EXCEPT when the source chart is itself a live take: denoise() strips the
+    # "(Live at …)" qualifier from the query, so filtering Live would leave the
+    # genuinely-live chart with NO correct recording. Only a parenthetical marker
+    # counts — a bare title word ("Live and Let Die") is a real word, not a live
+    # tag — mirroring what denoise removes.
+    if q and not _LIVE_GROUP_RE.search(str(title or "")):
         q += " AND -secondarytype:Live"
     return q
 

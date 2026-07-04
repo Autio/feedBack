@@ -154,6 +154,18 @@ def test_build_recording_query_denoises_and_quotes():
     assert q == 'recording:"thunderstruck" AND artist:"acdc" AND -secondarytype:Live'
 
 
+def test_build_recording_query_keeps_live_for_live_charts():
+    """A chart that IS a live take must NOT get the live filter, or its only
+    correct recording is excluded. A bare title word ("Live and Let Die") is a
+    real word, not a marker, so it still filters."""
+    live = m.build_recording_query("AC/DC", "Highway to Hell (Live at Donington)")
+    assert "-secondarytype:Live" not in live
+    assert 'recording:"highway to hell"' in live
+    # A real word "live" in the title is not a live marker → still filtered.
+    bare = m.build_recording_query("Wings", "Live and Let Die")
+    assert "-secondarytype:Live" in bare
+
+
 def test_build_recording_query_escapes_and_handles_missing_artist():
     q = m.build_recording_query("", 'Say "Hello"')
     # Quotes are punct-stripped by denoise, so nothing to escape here — but
