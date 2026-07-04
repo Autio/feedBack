@@ -283,7 +283,11 @@ def _best_release(doc: dict) -> dict:
         clean = 0 if _is_clean_studio_album(rg) else 1
         status_ok = 0 if str(r.get("status", "")).lower() == "official" else 1
         date = str(r.get("date", "") or "9999")
-        return (clean, status_ok, date)
+        # Official FIRST, then prefer a clean studio album: this still surfaces
+        # the studio album over an (official) live/comp album for the display
+        # album/year, but never lets an UNofficial bootleg album outrank an
+        # official single/EP/comp — which `(clean, status_ok, …)` would.
+        return (status_ok, clean, date)
 
     return sorted(releases, key=sort_key)[0]
 

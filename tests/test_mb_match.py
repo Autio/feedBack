@@ -202,6 +202,29 @@ def test_parse_recording_doc_normalizes():
     assert c["mb_score"] == 98
 
 
+def test_best_release_prefers_official_single_over_unofficial_album():
+    """An OFFICIAL single/EP must outrank an UNofficial bootleg album for the
+    canonical album/year: official comes before the studio-album preference, so
+    a single-only song is never seeded from a bootleg. (`(clean, status_ok, …)`
+    would wrongly pick the bootleg.)"""
+    doc = {
+        "id": "rec-x", "title": "One-Off", "score": 90,
+        "artist-credit": [
+            {"name": "A", "joinphrase": "",
+             "artist": {"id": "a", "name": "A", "sort-name": "A"}}],
+        "releases": [
+            {"id": "rel-boot", "title": "Boot LP", "status": "Bootleg",
+             "date": "1990-01-01", "release-group": {"primary-type": "Album"}},
+            {"id": "rel-single", "title": "The Single", "status": "Official",
+             "date": "1988-01-01", "release-group": {"primary-type": "Single"}},
+        ],
+    }
+    c = m.parse_recording_doc(doc)
+    assert c["release_id"] == "rel-single"
+    assert c["album"] == "The Single"
+    assert c["studio"] is False   # a Single isn't a clean studio ALBUM
+
+
 def test_parse_recording_doc_joined_artist_credit():
     doc = dict(MB_DOC)
     doc["artist-credit"] = [
