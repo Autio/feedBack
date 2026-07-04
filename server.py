@@ -5253,6 +5253,16 @@ def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
     safe = filename.replace("\\", "/")
     if "\x00" in safe:
         return None
+    # Reject drive-letter / absolute paths in BOTH conventions. A POSIX "/x" is
+    # caught by the containment check below (the `/` operator discards `root`),
+    # but a Windows drive-absolute "C:/x" is treated as a relative "C:" dir on
+    # POSIX and would otherwise slip in as `<root>/C:/x` — so the contract must
+    # hold cross-platform (a shared library is reached from either OS).
+    from pathlib import PurePosixPath, PureWindowsPath
+    if (PurePosixPath(safe).is_absolute()
+            or PureWindowsPath(safe).is_absolute()
+            or PureWindowsPath(safe).drive):
+        return None
     try:
         root = dlc.resolve()
         # normpath collapses `.`/`..`/duplicate separators purely lexically —
