@@ -149,6 +149,7 @@ def apply_reference_pitch(
 
 
 PROFILE_IDS = ("guitar-lead", "guitar-rhythm", "bass")
+PROFILE_PATHWAYS = ("songs", "practice", "learn", "studio")
 DEFAULT_ACTIVE_INSTRUMENT_PROFILE = "guitar-lead"
 PROFILE_DEFAULTS: dict[str, dict] = {
     "guitar-lead": {
@@ -159,6 +160,7 @@ PROFILE_DEFAULTS: dict[str, dict] = {
         "string_count": 6,
         "tuning": "Standard",
         "reference_pitch": DEFAULT_REFERENCE_PITCH,
+        "pathway": "songs",
     },
     "guitar-rhythm": {
         "id": "guitar-rhythm",
@@ -168,6 +170,7 @@ PROFILE_DEFAULTS: dict[str, dict] = {
         "string_count": 6,
         "tuning": "Standard",
         "reference_pitch": DEFAULT_REFERENCE_PITCH,
+        "pathway": "songs",
     },
     "bass": {
         "id": "bass",
@@ -177,6 +180,7 @@ PROFILE_DEFAULTS: dict[str, dict] = {
         "string_count": 4,
         "tuning": "Standard",
         "reference_pitch": DEFAULT_REFERENCE_PITCH,
+        "pathway": "songs",
     },
 }
 
@@ -250,6 +254,9 @@ def normalize_instrument_profile(profile_id: str, raw) -> tuple[dict | None, str
     role = raw.get("role", base["role"])
     if not isinstance(role, str) or len(role) > 32:
         return None, f"instrument_profiles.{profile_id}.role must be a short string"
+    pathway = raw.get("pathway", base["pathway"])
+    if not isinstance(pathway, str) or pathway not in PROFILE_PATHWAYS:
+        return None, f"instrument_profiles.{profile_id}.pathway must be one of songs, practice, learn, studio"
 
     out = dict(base)
     out.update({
@@ -260,6 +267,7 @@ def normalize_instrument_profile(profile_id: str, raw) -> tuple[dict | None, str
         "string_count": string_count,
         "tuning": tuning,
         "reference_pitch": ref,
+        "pathway": pathway,
     })
     return out, None
 
@@ -297,6 +305,7 @@ def profile_from_legacy_settings(cfg: dict) -> dict:
         key = instrument_key(instrument, sc)
     tuning = _valid_tuning_for_key(key, cfg.get("tuning", "Standard")) or "Standard"
     ref = _valid_reference_pitch(cfg.get("reference_pitch", DEFAULT_REFERENCE_PITCH)) or DEFAULT_REFERENCE_PITCH
+    pathway = cfg.get("pathway") if cfg.get("pathway") in PROFILE_PATHWAYS else "songs"
     profile_id = "bass" if instrument == "bass" else DEFAULT_ACTIVE_INSTRUMENT_PROFILE
     profile = dict(PROFILE_DEFAULTS[profile_id])
     profile.update({
@@ -304,6 +313,7 @@ def profile_from_legacy_settings(cfg: dict) -> dict:
         "string_count": sc,
         "tuning": tuning,
         "reference_pitch": ref,
+        "pathway": pathway,
     })
     return profile
 
@@ -326,13 +336,14 @@ def settings_with_instrument_profiles(cfg: dict) -> dict:
     out["string_count"] = selected["string_count"]
     out["tuning"] = selected["tuning"]
     out["reference_pitch"] = selected["reference_pitch"]
+    out["pathway"] = selected["pathway"]
     return out
 
 
 def apply_flat_instrument_patch_to_profiles(cfg: dict, updates: dict) -> dict:
     """Mirror legacy flat instrument updates into the active host profile."""
     out = settings_with_instrument_profiles(cfg)
-    if not any(k in updates for k in ("instrument", "string_count", "tuning", "reference_pitch")):
+    if not any(k in updates for k in ("instrument", "string_count", "tuning", "reference_pitch", "pathway")):
         return out
     active = active_profile_id(out.get("active_instrument_profile"))
     if "instrument" in updates:
@@ -348,6 +359,8 @@ def apply_flat_instrument_patch_to_profiles(cfg: dict, updates: dict) -> dict:
         current["string_count"] = updates["string_count"]
     if "reference_pitch" in updates:
         current["reference_pitch"] = updates["reference_pitch"]
+    if "pathway" in updates:
+        current["pathway"] = updates["pathway"]
     if "tuning" in updates:
         current["tuning"] = updates["tuning"]
     else:
@@ -364,6 +377,7 @@ def apply_flat_instrument_patch_to_profiles(cfg: dict, updates: dict) -> dict:
         "string_count": profile["string_count"],
         "tuning": profile["tuning"],
         "reference_pitch": profile["reference_pitch"],
+        "pathway": profile["pathway"],
     })
     return out
 

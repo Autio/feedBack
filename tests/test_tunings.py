@@ -186,6 +186,8 @@ def test_settings_profiles_default_to_lead_rhythm_and_bass():
     assert settings["instrument"] == "guitar"
     assert settings["string_count"] == 6
     assert settings["tuning"] == "Standard"
+    assert settings["pathway"] == "songs"
+    assert settings["instrument_profiles"]["guitar-lead"]["pathway"] == "songs"
 
 
 def test_settings_profiles_migrate_legacy_flat_bass_selection():
@@ -194,11 +196,14 @@ def test_settings_profiles_migrate_legacy_flat_bass_selection():
         "string_count": 6,
         "tuning": "C Standard",
         "reference_pitch": 432,
+        "pathway": "practice",
     })
     assert settings["active_instrument_profile"] == "bass"
     assert settings["instrument_profiles"]["bass"]["string_count"] == 6
     assert settings["instrument_profiles"]["bass"]["tuning"] == "C Standard"
     assert settings["reference_pitch"] == 432
+    assert settings["pathway"] == "practice"
+    assert settings["instrument_profiles"]["bass"]["pathway"] == "practice"
 
 
 def test_flat_patch_updates_active_profile_and_mirrors_legacy_keys():
@@ -206,6 +211,13 @@ def test_flat_patch_updates_active_profile_and_mirrors_legacy_keys():
     patched = apply_flat_instrument_patch_to_profiles(settings, {"tuning": "Drop D"})
     assert patched["tuning"] == "Drop D"
     assert patched["instrument_profiles"]["guitar-lead"]["tuning"] == "Drop D"
+
+
+def test_flat_pathway_patch_updates_active_profile_and_mirrors_legacy_key():
+    settings = settings_with_instrument_profiles({})
+    patched = apply_flat_instrument_patch_to_profiles(settings, {"pathway": "studio"})
+    assert patched["pathway"] == "studio"
+    assert patched["instrument_profiles"]["guitar-lead"]["pathway"] == "studio"
 
 
 def test_flat_instrument_patch_defaults_to_target_string_count():
@@ -223,5 +235,3 @@ def test_flat_string_count_patch_resets_incompatible_named_tuning():
     patched = apply_flat_instrument_patch_to_profiles(settings, {"string_count": 7})
     assert patched["string_count"] == 7
     assert patched["tuning"] == "Standard"
-
-

@@ -43,7 +43,7 @@ from song import (
 )
 from audio import find_wem_files, convert_wem
 from tunings import (
-    DEFAULT_REFERENCE_PITCH, DEFAULT_TUNINGS, PROFILE_IDS,
+    DEFAULT_REFERENCE_PITCH, DEFAULT_TUNINGS, PROFILE_IDS, PROFILE_PATHWAYS,
     apply_flat_instrument_patch_to_profiles, apply_reference_pitch,
     normalize_instrument_profiles, settings_with_instrument_profiles, tuning_name,
 )
@@ -9324,6 +9324,13 @@ def save_settings(data: dict):
             else:
                 return {"error": "tuning must be a name (string) or a list of semitone offsets"}
 
+    if "pathway" in data:
+        raw = data["pathway"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in PROFILE_PATHWAYS:
+                return {"error": "pathway must be one of songs, practice, learn, studio"}
+            updates["pathway"] = raw
+
     if "instrument_profiles" in data:
         raw = data["instrument_profiles"]
         if raw is not None:
@@ -9369,7 +9376,7 @@ def save_settings(data: dict):
 _RESETTABLE_SETTINGS_KEYS = frozenset({
     "default_arrangement", "demucs_server_url", "master_difficulty",
     "av_offset_ms", "countdown_before_song", "miss_penalty", "fail_behavior",
-    "reference_pitch", "instrument", "string_count", "tuning",
+    "reference_pitch", "instrument", "string_count", "tuning", "pathway",
     "instrument_profiles", "active_instrument_profile",
     "achievements_enabled", "use_amp_sims",
 })
@@ -9486,6 +9493,10 @@ def _validate_server_config_types(cfg: dict) -> str | None:
                     return "server_config.tuning offsets must be ≤8 integers between -12 and 12"
             else:
                 return "server_config.tuning must be a name (string) or a list of semitone offsets"
+    if "pathway" in cfg:
+        v = cfg["pathway"]
+        if v is not None and (not isinstance(v, str) or v not in PROFILE_PATHWAYS):
+            return "server_config.pathway must be one of songs, practice, learn, studio"
     if "instrument_profiles" in cfg:
         profiles, error = normalize_instrument_profiles(cfg["instrument_profiles"])
         if error:
@@ -12076,4 +12087,3 @@ def index_v2():
     # Always serve the classic v2 UI, independent of the env var, so the
     # fallback is reachable without flipping FEEDBACK_UI.
     return FileResponse(str(STATIC_DIR / "index.html"))
-

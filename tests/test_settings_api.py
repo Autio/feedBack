@@ -752,17 +752,20 @@ def test_get_settings_exposes_default_instrument_profiles(client, tmp_path):
     assert data["instrument"] == "guitar"
     assert data["string_count"] == 6
     assert data["tuning"] == "Standard"
+    assert data["pathway"] == "songs"
 
 
 def test_post_flat_instrument_updates_active_profile(client, tmp_path):
-    r = client.post("/api/settings", json={"instrument": "bass"})
+    r = client.post("/api/settings", json={"instrument": "bass", "pathway": "practice"})
     assert r.status_code == 200
     cfg = _read_cfg(tmp_path)
     assert cfg["active_instrument_profile"] == "bass"
     assert cfg["instrument"] == "bass"
     assert cfg["string_count"] == 4
     assert cfg["tuning"] == "Standard"
+    assert cfg["pathway"] == "practice"
     assert cfg["instrument_profiles"]["bass"]["string_count"] == 4
+    assert cfg["instrument_profiles"]["bass"]["pathway"] == "practice"
 
 
 def test_post_instrument_profiles_mirrors_active_profile(client, tmp_path):
@@ -773,6 +776,7 @@ def test_post_instrument_profiles_mirrors_active_profile(client, tmp_path):
                 "string_count": 7,
                 "tuning": "Drop A",
                 "reference_pitch": 432,
+                "pathway": "studio",
             },
             "bass": {
                 "string_count": 6,
@@ -787,6 +791,14 @@ def test_post_instrument_profiles_mirrors_active_profile(client, tmp_path):
     assert cfg["string_count"] == 7
     assert cfg["tuning"] == "Drop A"
     assert cfg["reference_pitch"] == 432
+    assert cfg["pathway"] == "studio"
+
+
+def test_post_pathway_rejects_bad_value(client, tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps({"pathway": "songs"}))
+    r = client.post("/api/settings", json={"pathway": "invalid"})
+    assert "error" in r.json()
+    assert _read_cfg(tmp_path)["pathway"] == "songs"
 
 
 def test_post_instrument_profiles_rejects_bad_custom_string_count(client, tmp_path):
@@ -803,18 +815,20 @@ def test_reset_clears_requested_keys(client, tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({
         "master_difficulty": 40,
         "countdown_before_song": True,
+        "pathway": "studio",
         "default_arrangement": "Lead",
         "demucs_server_url": "http://demucs.example:9000",
     }))
     r = client.post("/api/settings/reset",
-                    json={"keys": ["master_difficulty", "countdown_before_song"]})
+                    json={"keys": ["master_difficulty", "countdown_before_song", "pathway"]})
     assert r.status_code == 200
     body = r.json()
-    assert set(body["reset"]) == {"master_difficulty", "countdown_before_song"}
+    assert set(body["reset"]) == {"master_difficulty", "countdown_before_song", "pathway"}
     cfg = _read_cfg(tmp_path)
     # Reset removes the key so GET falls back to the default.
     assert "master_difficulty" not in cfg
     assert "countdown_before_song" not in cfg
+    assert "pathway" not in cfg
     # Unlisted keys are untouched.
     assert cfg["default_arrangement"] == "Lead"
     assert cfg["demucs_server_url"] == "http://demucs.example:9000"
@@ -841,4 +855,3 @@ def test_reset_with_no_config_is_noop(client, tmp_path):
     r = client.post("/api/settings/reset", json={"keys": ["master_difficulty"]})
     assert r.status_code == 200
     assert r.json()["reset"] == []
-
