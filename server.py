@@ -5822,8 +5822,8 @@ _BUILTIN_STARTER_SOURCES: list[tuple[str, str]] = [
         "content/starter/star_spangled_banner.feedpak",
     ),
     (
-        "beethoven-ode_to_joy.feedpak",
-        "content/starter/beethoven-ode_to_joy.feedpak",
+        "the_adicts-ode-to-joy_vst_cover.feedpak",
+        "content/starter/the_adicts-ode-to-joy_vst_cover.feedpak",
     ),
 ]
 _STARTER_SEED_MARKER = ".starter-content-seeded"
