@@ -531,7 +531,10 @@
         // opt-IN per the dev-chat thread.
         const optInToggles = [
             ['artist-external-links', 'artist_external_links'],
+            // Audio fingerprinting is opt-in (needs a key + fpcalc), default OFF.
+            ['acoustid-enabled', 'acoustid_enabled'],
         ].map(([id, key]) => [document.getElementById(id), key]).filter(([el]) => el);
+        const acoustidKeyEl = document.getElementById('acoustid-api-key');
         if (!toggles.length && !optInToggles.length && !sel && !btn) return;
         (async () => {
             try {
@@ -540,6 +543,7 @@
                     const cfg = await r.json();
                     for (const [el, key] of toggles) el.checked = cfg[key] !== false;
                     for (const [el, key] of optInToggles) el.checked = cfg[key] === true;
+                    if (acoustidKeyEl) acoustidKeyEl.value = cfg.acoustid_api_key || '';
                     if (sel) {
                         const t = Number(cfg.enrich_auto_threshold);
                         const want = Number.isFinite(t) ? t : 0.9;
@@ -564,6 +568,7 @@
         }
         sel?.addEventListener('change', () => save('enrich_auto_threshold', Number(sel.value)));
         order?.addEventListener('change', () => save('enrich_review_order', order.value));
+        acoustidKeyEl?.addEventListener('change', () => save('acoustid_api_key', acoustidKeyEl.value.trim()));
         btn?.addEventListener('click', async () => {
             await post('/api/enrichment/kick');
             const line = document.getElementById('enrich-status');

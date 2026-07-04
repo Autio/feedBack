@@ -7616,41 +7616,58 @@ def api_enrichment_search(artist: str = "", title: str = "", limit: int = 8,
 
 
 @app.post("/api/enrichment/identify")
-def api_enrichment_identify(file: UploadFile = File(...)):
+async def api_enrichment_identify(request: Request):
     """Identify a song by AUDIO FINGERPRINT (AcoustID) rather than text — the
     reliable way to get the EXACT recording/version (the studio take, not a live
     bootleg or an extended cut). Upload the master audio; returns candidates in
     the same shape as /search, so the review UI and the editor's Match popup can
     render fingerprint hits identically. 412 `needs_setup` when the user hasn't
     opted in / has no key (the UI nudges them to Settings); 503 when it's set up
-    but the fpcalc Chromaprint binary is missing or the network is off. Sync
-    route: the fpcalc subprocess + HTTP run in FastAPI's threadpool."""
+    but the fpcalc Chromaprint binary is missing or the network is off. Async so
+    the multipart is size-capped BEFORE spooling; the blocking fpcalc subprocess
+    + AcoustID HTTP run in the threadpool via run_in_executor."""
     gate = _acoustid_gate()
     if gate is not None:
         return gate
+    # Pre-parse Content-Length guard — reject an oversized body before Starlette
+    # spools the multipart to temp disk (mirrors the song-upload endpoint). The
+    # per-part cap below is the authoritative limit; this is the fast up-front no.
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            cl_int = int(cl)
+        except ValueError:
+            return JSONResponse({"error": "Invalid Content-Length header"}, status_code=400)
+        if cl_int > _ACOUSTID_MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD_SLACK:
+            return JSONResponse({"error": "audio upload too large (256 MB max)"}, status_code=413)
+    try:
+        form = await request.form(max_part_size=_ACOUSTID_MAX_UPLOAD_BYTES)
+    except Exception:
+        return JSONResponse({"error": "audio upload too large (256 MB max)"}, status_code=413)
+    file = form.get("file")
+    if not isinstance(file, UploadFile):
+        raise HTTPException(status_code=400, detail="missing file upload")
     import tempfile
     ext = (Path(file.filename or "").suffix or ".bin").lower()
     tmpdir = tempfile.mkdtemp(prefix="feedback_acoustid_")
     tmp = os.path.join(tmpdir, "audio" + ext)
     try:
-        # Stream the upload to disk with a cap instead of reading it all into
-        # memory — an oversized upload must not balloon RAM (fpcalc reads from
-        # the temp file anyway). Generous ceiling for an uncompressed master.
         total = 0
         with open(tmp, "wb") as fh:
             while True:
-                chunk = file.file.read(1024 * 1024)
+                chunk = await file.read(1024 * 1024)
                 if not chunk:
                     break
                 total += len(chunk)
                 if total > _ACOUSTID_MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail="audio upload too large (256 MB max)")
+                    return JSONResponse(
+                        {"error": "audio upload too large (256 MB max)"}, status_code=413)
                 fh.write(chunk)
         if total == 0:
             raise HTTPException(status_code=400, detail="empty upload")
-        cands = _identify_by_fingerprint(tmp)
+        # fpcalc subprocess + AcoustID HTTP are blocking — off the event loop.
+        cands = await asyncio.get_event_loop().run_in_executor(
+            None, _identify_by_fingerprint, tmp)
     except EnrichTransportError as e:
         return JSONResponse({"error": "acoustid unavailable", "detail": str(e)},
                             status_code=503)
