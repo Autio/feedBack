@@ -2,7 +2,17 @@
 
 import pytest
 
-from tunings import tuning_name
+from tunings import (
+    DEFAULT_TUNINGS,
+    TUNING_PRESET_MIDIS,
+    apply_flat_instrument_patch_to_profiles,
+    open_midis_to_freqs,
+    settings_with_instrument_profiles,
+    tuning_midis_from_offsets,
+    tuning_name,
+    tuning_offsets_from_midis,
+    tuning_preset_offsets,
+)
 
 
 # ── Standard tunings (all six strings share the same offset) ─────────────────
@@ -132,3 +142,86 @@ def test_drop_pattern_takes_precedence_over_named_dict():
     # auto-generator fires first and produces the same string. The named dict entry
     # is effectively dead code for this case — this test documents the behavior.
     assert tuning_name([-2, 0, 0, 0, 0, 0]) == "Drop D"
+
+
+# ── Host tuning profile catalogue -------------------------------------------
+
+def test_default_tunings_include_extended_host_profiles():
+    assert "bass-6" in DEFAULT_TUNINGS
+    assert "C Standard" in DEFAULT_TUNINGS["guitar-6"]
+    assert "C# Standard" in DEFAULT_TUNINGS["guitar-6"]
+    assert "Drop Ab" in DEFAULT_TUNINGS["guitar-6"]
+    assert "BEAD" in DEFAULT_TUNINGS["bass-4"]
+    assert "High C" in DEFAULT_TUNINGS["bass-5"]
+    assert "Drop A + Drop E" in DEFAULT_TUNINGS["guitar-8"]
+
+
+def test_default_tuning_frequencies_are_derived_from_midis():
+    assert DEFAULT_TUNINGS["guitar-6"]["Standard"] == open_midis_to_freqs([40, 45, 50, 55, 59, 64])
+    assert DEFAULT_TUNINGS["bass-6"]["Standard"] == open_midis_to_freqs([23, 28, 33, 38, 43, 48])
+
+
+def test_tuning_offsets_from_named_presets():
+    assert tuning_preset_offsets("guitar-6", "Drop D") == [-2, 0, 0, 0, 0, 0]
+    assert tuning_preset_offsets("guitar-6", "C Standard") == [-4, -4, -4, -4, -4, -4]
+    assert tuning_preset_offsets("bass-4", "BEAD") == [-5, -5, -5, -5]
+    assert tuning_preset_offsets("bass-5", "High C") == [5, 5, 5, 5, 5]
+
+
+def test_tuning_midis_round_trip_offsets():
+    offsets = [-2, 0, 0, 0, 0, 0]
+    midis = tuning_midis_from_offsets("guitar-6", offsets)
+    assert midis == TUNING_PRESET_MIDIS["guitar-6"]["Drop D"]
+    assert tuning_offsets_from_midis("guitar-6", midis) == offsets
+
+
+def test_tuning_conversion_rejects_wrong_string_count():
+    assert tuning_offsets_from_midis("guitar-6", [40, 45, 50, 55]) is None
+    assert tuning_midis_from_offsets("bass-4", [0, 0, 0, 0, 0]) is None
+
+def test_settings_profiles_default_to_lead_rhythm_and_bass():
+    settings = settings_with_instrument_profiles({})
+    assert settings["active_instrument_profile"] == "guitar-lead"
+    assert set(settings["instrument_profiles"]) == {"guitar-lead", "guitar-rhythm", "bass"}
+    assert settings["instrument"] == "guitar"
+    assert settings["string_count"] == 6
+    assert settings["tuning"] == "Standard"
+
+
+def test_settings_profiles_migrate_legacy_flat_bass_selection():
+    settings = settings_with_instrument_profiles({
+        "instrument": "bass",
+        "string_count": 6,
+        "tuning": "C Standard",
+        "reference_pitch": 432,
+    })
+    assert settings["active_instrument_profile"] == "bass"
+    assert settings["instrument_profiles"]["bass"]["string_count"] == 6
+    assert settings["instrument_profiles"]["bass"]["tuning"] == "C Standard"
+    assert settings["reference_pitch"] == 432
+
+
+def test_flat_patch_updates_active_profile_and_mirrors_legacy_keys():
+    settings = settings_with_instrument_profiles({})
+    patched = apply_flat_instrument_patch_to_profiles(settings, {"tuning": "Drop D"})
+    assert patched["tuning"] == "Drop D"
+    assert patched["instrument_profiles"]["guitar-lead"]["tuning"] == "Drop D"
+
+
+def test_flat_instrument_patch_defaults_to_target_string_count():
+    settings = settings_with_instrument_profiles({"instrument": "guitar", "string_count": 6, "tuning": "Drop D"})
+    patched = apply_flat_instrument_patch_to_profiles(settings, {"instrument": "bass"})
+    assert patched["instrument"] == "bass"
+    assert patched["string_count"] == 4
+    assert patched["tuning"] == "Standard"
+    assert patched["active_instrument_profile"] == "bass"
+    assert patched["instrument_profiles"]["bass"]["string_count"] == 4
+
+
+def test_flat_string_count_patch_resets_incompatible_named_tuning():
+    settings = settings_with_instrument_profiles({"instrument": "guitar", "string_count": 6, "tuning": "DADGAD"})
+    patched = apply_flat_instrument_patch_to_profiles(settings, {"string_count": 7})
+    assert patched["string_count"] == 7
+    assert patched["tuning"] == "Standard"
+
+

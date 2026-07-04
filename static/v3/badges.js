@@ -21,7 +21,7 @@
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-    const STRING_COUNTS = { guitar: [6, 7, 8], bass: [4, 5] };
+    const STRING_COUNTS = { guitar: [6, 7, 8], bass: [4, 5, 6] };
     // Tuning names per instrument key (e.g. 'guitar-6', 'bass-4'), loaded from
     // GET /api/tunings. Falls back to empty arrays until the fetch resolves.
     let _tuningsByKey = {};

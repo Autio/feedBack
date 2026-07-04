@@ -744,6 +744,59 @@ def test_defaults_include_gameplay_keys(client, tmp_path):
     assert data["fail_behavior"] == "continue"
 
 
+
+def test_get_settings_exposes_default_instrument_profiles(client, tmp_path):
+    data = client.get("/api/settings").json()
+    assert data["active_instrument_profile"] == "guitar-lead"
+    assert set(data["instrument_profiles"]) == {"guitar-lead", "guitar-rhythm", "bass"}
+    assert data["instrument"] == "guitar"
+    assert data["string_count"] == 6
+    assert data["tuning"] == "Standard"
+
+
+def test_post_flat_instrument_updates_active_profile(client, tmp_path):
+    r = client.post("/api/settings", json={"instrument": "bass"})
+    assert r.status_code == 200
+    cfg = _read_cfg(tmp_path)
+    assert cfg["active_instrument_profile"] == "bass"
+    assert cfg["instrument"] == "bass"
+    assert cfg["string_count"] == 4
+    assert cfg["tuning"] == "Standard"
+    assert cfg["instrument_profiles"]["bass"]["string_count"] == 4
+
+
+def test_post_instrument_profiles_mirrors_active_profile(client, tmp_path):
+    r = client.post("/api/settings", json={
+        "active_instrument_profile": "guitar-rhythm",
+        "instrument_profiles": {
+            "guitar-rhythm": {
+                "string_count": 7,
+                "tuning": "Drop A",
+                "reference_pitch": 432,
+            },
+            "bass": {
+                "string_count": 6,
+                "tuning": "C Standard",
+            },
+        },
+    })
+    assert r.status_code == 200
+    cfg = _read_cfg(tmp_path)
+    assert cfg["active_instrument_profile"] == "guitar-rhythm"
+    assert cfg["instrument"] == "guitar"
+    assert cfg["string_count"] == 7
+    assert cfg["tuning"] == "Drop A"
+    assert cfg["reference_pitch"] == 432
+
+
+def test_post_instrument_profiles_rejects_bad_custom_string_count(client, tmp_path):
+    r = client.post("/api/settings", json={
+        "instrument_profiles": {
+            "bass": {"string_count": 6, "tuning": [0, 0, 0, 0]},
+        },
+    })
+    assert "error" in r.json()
+
 # ── /api/settings/reset ─────────────────────────────────────────────────────
 
 def test_reset_clears_requested_keys(client, tmp_path):
@@ -788,3 +841,4 @@ def test_reset_with_no_config_is_noop(client, tmp_path):
     r = client.post("/api/settings/reset", json={"keys": ["master_difficulty"]})
     assert r.status_code == 200
     assert r.json()["reset"] == []
+

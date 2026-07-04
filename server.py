@@ -42,7 +42,11 @@ from song import (
     scale_degree_for_pitch,
 )
 from audio import find_wem_files, convert_wem
-from tunings import tuning_name, DEFAULT_TUNINGS, DEFAULT_REFERENCE_PITCH, apply_reference_pitch
+from tunings import (
+    DEFAULT_REFERENCE_PITCH, DEFAULT_TUNINGS, PROFILE_IDS,
+    apply_flat_instrument_patch_to_profiles, apply_reference_pitch,
+    normalize_instrument_profiles, settings_with_instrument_profiles, tuning_name,
+)
 import sloppak as sloppak_mod
 import drums as drums_mod
 import notation as notation_mod
@@ -9111,7 +9115,7 @@ def get_tunings():
 @app.get("/api/settings")
 def get_settings():
     cfg = _load_config(CONFIG_DIR / "config.json")
-    return cfg if cfg is not None else _default_settings()
+    return settings_with_instrument_profiles(cfg if cfg is not None else _default_settings())
 
 
 @app.post("/api/settings")
@@ -9320,6 +9324,19 @@ def save_settings(data: dict):
             else:
                 return {"error": "tuning must be a name (string) or a list of semitone offsets"}
 
+    if "instrument_profiles" in data:
+        raw = data["instrument_profiles"]
+        if raw is not None:
+            profiles, error = normalize_instrument_profiles(raw)
+            if error:
+                return {"error": error}
+            updates["instrument_profiles"] = profiles
+    if "active_instrument_profile" in data:
+        raw = data["active_instrument_profile"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in PROFILE_IDS:
+                return {"error": "active_instrument_profile must be one of guitar-lead, guitar-rhythm, bass"}
+            updates["active_instrument_profile"] = raw
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Critical section — the read-merge-write must be atomic. FastAPI runs
     # sync handlers in a threadpool, so two concurrent partial POSTs (e.g.
@@ -9336,6 +9353,11 @@ def save_settings(data: dict):
         if cfg is None:
             cfg = _default_settings()
         cfg.update(updates)
+        try:
+            cfg = apply_flat_instrument_patch_to_profiles(cfg, updates)
+        except ValueError as exc:
+            return {"error": str(exc)}
+        cfg = settings_with_instrument_profiles(cfg)
         _atomic_write_file(config_file, json.dumps(cfg, indent=2).encode("utf-8"))
     return {"message": ". ".join(messages) if messages else "Settings saved"}
 
@@ -9348,6 +9370,7 @@ _RESETTABLE_SETTINGS_KEYS = frozenset({
     "default_arrangement", "demucs_server_url", "master_difficulty",
     "av_offset_ms", "countdown_before_song", "miss_penalty", "fail_behavior",
     "reference_pitch", "instrument", "string_count", "tuning",
+    "instrument_profiles", "active_instrument_profile",
     "achievements_enabled", "use_amp_sims",
 })
 
@@ -9463,6 +9486,14 @@ def _validate_server_config_types(cfg: dict) -> str | None:
                     return "server_config.tuning offsets must be ≤8 integers between -12 and 12"
             else:
                 return "server_config.tuning must be a name (string) or a list of semitone offsets"
+    if "instrument_profiles" in cfg:
+        profiles, error = normalize_instrument_profiles(cfg["instrument_profiles"])
+        if error:
+            return f"server_config.{error}"
+    if "active_instrument_profile" in cfg:
+        v = cfg["active_instrument_profile"]
+        if v is not None and (not isinstance(v, str) or v not in PROFILE_IDS):
+            return "server_config.active_instrument_profile must be one of guitar-lead, guitar-rhythm, bass"
     return None
 
 
@@ -9832,6 +9863,7 @@ def export_settings():
     server_config = _load_config(config_file)
     if server_config is None:
         server_config = _default_settings()
+    server_config = settings_with_instrument_profiles(server_config)
 
     # Snapshot the library DB + custom art FIRST: if the irreplaceable state
     # can't be captured, abort with an error rather than hand back a bundle
@@ -10074,7 +10106,7 @@ def import_settings(bundle: dict):
         with _settings_lock:
             _atomic_write_file(
                 CONFIG_DIR / "config.json",
-                json.dumps(server_config, indent=2).encode("utf-8"),
+                json.dumps(settings_with_instrument_profiles(server_config), indent=2).encode("utf-8"),
             )
     except OSError as e:
         # Phase-1 validation should have caught all foreseeable
@@ -12044,3 +12076,4 @@ def index_v2():
     # Always serve the classic v2 UI, independent of the env var, so the
     # fallback is reachable without flipping FEEDBACK_UI.
     return FileResponse(str(STATIC_DIR / "index.html"))
+
