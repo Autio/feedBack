@@ -43,7 +43,12 @@ from song import (
     scale_degree_for_pitch,
 )
 from audio import find_wem_files, convert_wem
-from tunings import tuning_name, DEFAULT_TUNINGS, DEFAULT_REFERENCE_PITCH, apply_reference_pitch
+from tunings import (
+    DEFAULT_REFERENCE_PITCH, DEFAULT_TUNINGS, PROFILE_IDS, PROFILE_PATHWAYS,
+    apply_flat_instrument_patch_to_profiles, apply_reference_pitch,
+    normalize_instrument_profile, normalize_instrument_profiles,
+    settings_with_instrument_profiles, tuning_name,
+)
 import sloppak as sloppak_mod
 import drums as drums_mod
 import notation as notation_mod
@@ -52,6 +57,7 @@ import loosefolder as loosefolder_mod
 # tier classification + response parsing. No network/DB in there — the
 # throttled transport and the song_enrichment writes live in this module.
 import mb_match
+import acoustid_match
 # Metadata extraction lives in a side-effect-free module so ProcessPool
 # scan workers can import + unpickle _scan_one without re-running this
 # module's import-time side effects (see lib/scan_worker.py).
@@ -240,7 +246,14 @@ _DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
     # anonymous demo visitors (they'd spend the shared rate limit).
     ("POST",   re.compile(r"^/api/enrichment/review/.+$")),
     ("POST",   re.compile(r"^/api/enrichment/kick$")),
+    ("POST",   re.compile(r"^/api/enrichment/cancel$")),
+    ("POST",   re.compile(r"^/api/enrichment/rematch$")),
     ("GET",    re.compile(r"^/api/enrichment/search$")),
+    # AcoustID audio fingerprinting: both identify endpoints run fpcalc (CPU)
+    # and spend the shared AcoustID rate budget on the caller's behalf — same
+    # rule as the search/kick relays above; not for anonymous demo visitors.
+    ("POST",   re.compile(r"^/api/enrichment/identify$")),
+    ("POST",   re.compile(r"^/api/enrichment/identify/.+$")),
     # Context menus (R2): the per-song re-match mutates the cache + spends
     # rate limit; Get-info exposes filesystem paths.
     ("POST",   re.compile(r"^/api/enrichment/refresh/.+$")),
@@ -3005,6 +3018,26 @@ class MetadataDB:
                 "JOIN songs s ON s.filename = e.filename GROUP BY e.match_state").fetchall()
         return {r[0]: r[1] for r in rows}
 
+    def enrichment_states_for(self, filenames: list[str]) -> dict:
+        """{filename: match_state} for the given songs — a never-enriched (or
+        unknown) filename is simply absent from the result. Powers the per-tile
+        badges on the "Refresh Metadata" batch: the grid polls only the
+        filenames in its visible window, not the whole library, so a card can
+        animate queued→working→result without a per-song round-trip."""
+        if not filenames:
+            return {}
+        out: dict = {}
+        with self._lock:
+            # Chunk under SQLite's variable limit so a huge visible window (or a
+            # hostile caller) can't overflow the single IN (...) parameter list.
+            for i in range(0, len(filenames), 400):
+                chunk = filenames[i:i + 400]
+                q = ("SELECT filename, match_state FROM song_enrichment "
+                     "WHERE filename IN (%s)" % ",".join("?" * len(chunk)))
+                for fn, st in self.conn.execute(q, chunk).fetchall():
+                    out[fn] = st
+        return out
+
     def enrichment_song_row(self, filename: str) -> dict | None:
         """The identity fields the matcher/scorer keys on, for one song."""
         row = self.conn.execute(
@@ -5229,10 +5262,52 @@ def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
     check so every filename-bound handler validates before touching the
     filesystem.
 
-    Returns the validated resolved Path, or None if the path is empty
-    or escapes the DLC root.
+    Containment here is LEXICAL (normalize `.`/`..` WITHOUT following
+    symlinks), not `safe_join`'s `.resolve()`-based check — because users
+    commonly mount their song library through a directory JUNCTION/symlink
+    (a library shared across app installs; the desktop app's own mounts).
+    `.resolve()` follows that junction to its real target, sees it sits
+    outside DLC_DIR, and wrongly rejects every song reached through it — the
+    scanner's `rglob` indexes those songs, but art/load then 403/404s (broken
+    covers, unplayable songs). Lexical normalization still rejects the only
+    escapes a `:path` filename can express — `..` traversal and absolute
+    paths — which the traversal tests pin. `safe_join` stays strict (it is
+    the zip-slip / plugin-asset guard, where following a symlink out IS the
+    defense); the loose-folder art handler keeps its own per-file symlink
+    re-check for defence-in-depth.
+
+    Returns the validated Path (not necessarily link-resolved), or None if
+    the filename is empty, contains a NUL, or escapes the DLC root.
     """
-    return safe_join(dlc, filename)
+    if not filename:
+        return None
+    # Backslashes → forward slashes so a Windows-style `..\\x` traversal is
+    # rejected identically on POSIX (mirrors safe_join's normalisation).
+    safe = filename.replace("\\", "/")
+    if "\x00" in safe:
+        return None
+    # Reject drive-letter / absolute paths in BOTH conventions. A POSIX "/x" is
+    # caught by the containment check below (the `/` operator discards `root`),
+    # but a Windows drive-absolute "C:/x" is treated as a relative "C:" dir on
+    # POSIX and would otherwise slip in as `<root>/C:/x` — so the contract must
+    # hold cross-platform (a shared library is reached from either OS).
+    from pathlib import PurePosixPath, PureWindowsPath
+    if (PurePosixPath(safe).is_absolute()
+            or PureWindowsPath(safe).is_absolute()
+            or PureWindowsPath(safe).drive):
+        return None
+    try:
+        root = dlc.resolve()
+        # normpath collapses `.`/`..`/duplicate separators purely lexically —
+        # it never touches the filesystem, so an in-library junction component
+        # is preserved (allowed) while `..`/absolute segments still escape and
+        # get caught by the containment check below.
+        candidate = Path(os.path.normpath(root / safe))
+        if not candidate.is_relative_to(root):
+            return None
+    except (ValueError, OSError):
+        return None
+    return candidate
 
 
 _SMART_TYPE_BASE: dict[str, int] = {"Lead": 0, "Rhythm": 10, "Bass": 20}
@@ -5822,8 +5897,8 @@ _BUILTIN_STARTER_SOURCES: list[tuple[str, str]] = [
         "content/starter/star_spangled_banner.feedpak",
     ),
     (
-        "beethoven-ode_to_joy.feedpak",
-        "content/starter/beethoven-ode_to_joy.feedpak",
+        "the_adicts-ode-to-joy_vst_cover.feedpak",
+        "content/starter/the_adicts-ode-to-joy_vst_cover.feedpak",
     ),
 ]
 _STARTER_SEED_MARKER = ".starter-content-seeded"
@@ -6131,7 +6206,16 @@ def _scan_runner():
 
 _enrich_kick_lock = threading.Lock()
 _enrich_pending_pass = False
-_enrich_status = {"running": False, "processed": 0, "last_pass_at": None}
+# processed = phase-1 stubs stamped this pass (legacy field). total/matched =
+# the phase-2 MATCHING progress the "Refresh Metadata" batch bar reads (the
+# slow, rate-limited part worth a progress readout); current = the song being
+# matched right now, which drives the per-tile "working" badge.
+_enrich_status = {"running": False, "processed": 0, "last_pass_at": None,
+                  "total": 0, "matched": 0, "current": None}
+# Cooperative cancel for the Stop button: the matching/art loops check it
+# between songs (an in-flight ≤1/s lookup can't be interrupted, but no new one
+# is started). Set by /api/enrichment/cancel, cleared when a fresh pass kicks.
+_enrich_cancel = threading.Event()
 # Minimum spacing between EXTERNAL lookups (design: ≤1 req/s + local cache).
 _ENRICH_MIN_INTERVAL = 1.1
 _enrich_last_fetch = 0.0
@@ -6235,17 +6319,20 @@ def _mb_http_get(path: str, params: dict) -> dict | None:
         raise EnrichTransportError("bad JSON from musicbrainz") from e
 
 
-def _mb_search_recordings(artist, title, limit: int = 8) -> list[dict]:
-    """Text search (tier 2–4): denoised Lucene query over /recording.
+def _mb_search_recordings(artist, title, limit: int = 12) -> list[dict]:
+    """Text search (tier 2–4): denoised Lucene query over /recording. The strict
+    query drops live-only recordings and the ranker rewards the studio take, so a
+    slightly larger default result set gives the re-ranker room to surface the
+    canonical version.
 
-    Runs the strict field-phrase query first (high precision, unchanged); if it
-    finds nothing, retries ONCE with a loose term query. The strict phrase only
-    matches MusicBrainz's *primary* artist/title, so a recording stored under a
-    non-Latin primary name (大橋純子) whose romanized form ("Junko Ohashi") is
-    only an alias is invisible to it — the loose query searches aliases and
-    rescues it. The retry spends a second throttled request only on a miss;
-    results are re-scored by rank_candidates, so the looser recall doesn't lower
-    match quality (auto-accept still needs the per-field floors)."""
+    Runs the strict field-phrase query first (high precision); if it finds
+    nothing, retries ONCE with a loose term query. The strict phrase only matches
+    MusicBrainz's *primary* artist/title, so a recording stored under a non-Latin
+    primary name (大橋純子) whose romanized form ("Junko Ohashi") is only an alias
+    is invisible to it — the loose query searches aliases and rescues it. The
+    retry spends a second throttled request only on a miss; results are re-scored
+    by rank_candidates, so the looser recall doesn't lower match quality
+    (auto-accept still needs the per-field floors)."""
     query = mb_match.build_recording_query(artist, title)
     cands: list[dict] = []
     if query:
@@ -6257,6 +6344,179 @@ def _mb_search_recordings(artist, title, limit: int = 8) -> list[dict]:
             body = _mb_http_get("recording", {"query": loose, "limit": limit})
             cands = mb_match.parse_search_response(body or {})
     return cands
+
+
+# ── AcoustID audio fingerprinting (content-based identification) ──────────────
+# Optional path: requires the Chromaprint `fpcalc` binary AND an AcoustID API
+# key ($ACOUSTID_API_KEY). Both absent ⇒ graceful no-op; the text matcher runs.
+
+_ACOUSTID_MAX_UPLOAD_BYTES = 256 * 1024 * 1024  # 256 MB — an uncompressed master
+
+
+def _fpcalc_bin() -> str | None:
+    """Locate the Chromaprint `fpcalc` binary: $FPCALC override, else PATH."""
+    import shutil
+    cand = os.environ.get("FPCALC")
+    if cand and Path(cand).exists():
+        return cand
+    return shutil.which("fpcalc")
+
+
+def _acoustid_settings() -> "tuple[bool, str]":
+    """(enabled, api_key) for AcoustID, resolved from settings with an env-var
+    fallback for the key. Opt-in: `acoustid_enabled` defaults off. The key lives
+    in settings so a user can set it themselves in the UI; $ACOUSTID_API_KEY is a
+    server-wide fallback for a headless deploy."""
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    enabled = cfg.get("acoustid_enabled", False) is True
+    key = cfg.get("acoustid_api_key")
+    if not isinstance(key, str) or not key.strip():
+        key = os.environ.get("ACOUSTID_API_KEY", "")
+    return enabled, (key or "").strip()
+
+
+def _acoustid_available() -> bool:
+    """True only when the user opted in, a key is set (settings or env), the
+    network is on, AND fpcalc exists."""
+    enabled, key = _acoustid_settings()
+    return (enabled
+            and _enrich_network_enabled()
+            and acoustid_match.is_configured(key)
+            and _fpcalc_bin() is not None)
+
+
+def _fpcalc(path: str) -> "tuple[int, str] | None":
+    """Fingerprint a local audio file → (duration_seconds, fingerprint). None on
+    any failure (missing binary/file, decode error, timeout)."""
+    binp = _fpcalc_bin()
+    if not binp or not Path(path).exists():
+        return None
+    import subprocess
+    import json as _json
+    try:
+        pr = subprocess.run([binp, "-json", str(path)],
+                            capture_output=True, timeout=30)
+    except Exception:
+        return None
+    if pr.returncode != 0:
+        return None
+    try:
+        data = _json.loads(pr.stdout.decode("utf-8", "replace"))
+        dur = int(round(float(data.get("duration"))))
+        fp = str(data.get("fingerprint") or "")
+    except Exception:
+        return None
+    if not fp or dur <= 0:
+        return None
+    return dur, fp
+
+
+def _acoustid_lookup(duration: int, fingerprint: str) -> list[dict]:
+    """Look a fingerprint up on AcoustID → candidate dicts (mb_match shape).
+    Throttled + offline-guarded like the MusicBrainz path. [] when unavailable
+    or no hit; raises EnrichTransportError for network-shaped failures."""
+    _, key = _acoustid_settings()
+    if not key or not _enrich_network_enabled():
+        return []
+    import requests
+    _enrich_throttle()
+    try:
+        # POST, not GET: a fingerprint is multi-KB (a 3.5-min track is ~3.5k
+        # chars), so a GET crams it into the URL and a long song overflows the
+        # server's URL limit → a spurious failure. AcoustID accepts the same
+        # params form-encoded in the body.
+        resp = requests.post(
+            f"{acoustid_match.ACOUSTID_API_ROOT}/lookup",
+            data={
+                "client": key, "format": "json",
+                "meta": acoustid_match.LOOKUP_META,
+                "duration": duration, "fingerprint": fingerprint,
+            },
+            headers={"User-Agent": _enrich_user_agent()},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        raise EnrichTransportError(str(e)) from e
+    if resp.status_code == 429:
+        raise EnrichTransportError("acoustid 429 (rate limited)")
+    if resp.status_code != 200:
+        raise EnrichTransportError(f"acoustid HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise EnrichTransportError("bad JSON from acoustid") from e
+    return acoustid_match.parse_lookup_response(body)
+
+
+def _identify_by_fingerprint(path: str) -> list[dict]:
+    """fpcalc + AcoustID lookup for a local audio file. [] if fingerprinting is
+    unavailable, the file can't be read, or nothing matched. Available to the
+    library-enrichment pipeline as well as the /identify endpoint."""
+    if not _acoustid_available():
+        return []
+    fp = _fpcalc(path)
+    if not fp:
+        return []
+    return _acoustid_lookup(fp[0], fp[1])
+
+
+def _acoustid_gate() -> "JSONResponse | None":
+    """Shared availability gate for the identify endpoints: None when ready,
+    else a 412 needs_setup (opt-in off / no key → the UI re-prompts) or a 503
+    (set up but fpcalc/network missing). Never lets a caller pretend a
+    fingerprint ran."""
+    if _acoustid_available():
+        return None
+    enabled, key = _acoustid_settings()
+    if not enabled or not key:
+        return JSONResponse(
+            {"error": "audio fingerprinting not set up", "needs_setup": True,
+             "detail": "Turn on AcoustID and add a free API key to identify by audio — "
+                       "it reads the recording itself, far more reliable than text search."},
+            status_code=412)
+    return JSONResponse(
+        {"error": "audio fingerprinting unavailable", "needs_setup": False,
+         "detail": "the fpcalc (Chromaprint) binary was not found on the server"},
+        status_code=503)
+
+
+def _song_audio_file(filename: str) -> "str | None":
+    """Resolve a LIBRARY song (by filename/id) to a local master-audio file for
+    fingerprinting: the full-mix `original_audio` extracted from a sloppak, or a
+    loose folder's audio. None when the song can't be found or ships no full-mix
+    audio (some packs carry only stems). Mirrors serve_sloppak_file's containment
+    guards so a crafted filename can't read outside DLC_DIR / the pack."""
+    dlc = _get_dlc_dir()
+    if not dlc:
+        return None
+    resolved = _resolve_dlc_path(dlc, filename)
+    if resolved is None or not resolved.exists():
+        return None
+    if sloppak_mod.is_sloppak(resolved):
+        try:
+            canon = resolved.relative_to(dlc.resolve()).as_posix()
+        except ValueError:
+            return None
+        rel = (sloppak_mod.load_manifest(resolved) or {}).get("original_audio")
+        if not isinstance(rel, str) or not rel.strip():
+            return None
+        src = sloppak_mod.get_cached_source_dir(canon)
+        if src is None:
+            try:
+                src = sloppak_mod.resolve_source_dir(canon, dlc, SLOPPAK_CACHE_DIR)
+            except Exception:
+                return None
+        target = (src / rel.strip()).resolve()
+        try:
+            target.relative_to(src.resolve())
+        except ValueError:
+            return None
+        return str(target) if target.is_file() else None
+    try:
+        audio = loosefolder_mod.find_audio(resolved)
+    except Exception:
+        audio = None
+    return str(audio) if audio and Path(str(audio)).is_file() else None
 
 
 def _mb_lookup_recording(mbid: str) -> dict | None:
@@ -6603,6 +6863,35 @@ def _enrich_field_filter(cfg: dict):
     return lambda cand: {k: v for k, v in cand.items() if k not in blocked}
 
 
+# Strips a trailing tag parenthetical from a filename stem — "(440Hz)",
+# "(Live)", "(No Lead)", the retune/arrangement noise CDLC names carry.
+_FN_TAG_RE = re.compile(r"\s*\([^)]*\)")
+
+
+def _artist_title_from_filename(filename: str) -> dict | None:
+    """Derive artist + title from the CDLC filename convention
+    'Artist_Song-Title_v1_p.feedpak' — spaces written as hyphens WITHIN a
+    field, underscores separating Artist | Title | version/arrangement. Used
+    ONLY as a match SEED for packs whose own `artist` field is blank (a large
+    slice of community charts): text search needs an artist, and the filename
+    reliably carries it. This never becomes displayed metadata — the shown
+    values still come from the confirmed MusicBrainz match (provenance
+    'matched'), so nothing estimated is presented as author-set; if no match is
+    found, the pack stays exactly as-is. Returns None when the name doesn't fit
+    the convention (so a non-CDLC pack falls through untouched)."""
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    base = base.rsplit(".", 1)[0]                 # drop the extension
+    base = _FN_TAG_RE.sub("", base).strip()       # drop "(440Hz)" etc.
+    parts = [p for p in base.split("_") if p]
+    if len(parts) < 2:
+        return None
+    artist = parts[0].replace("-", " ").strip()
+    title = parts[1].replace("-", " ").strip()
+    if not artist or not title:
+        return None
+    return {"artist": artist, "title": title}
+
+
 def _enrich_one(row: dict, auto_min: float | None = None, field_filter=None,
                 apply_mask: str = "") -> None:
     """The matcher (P8; replaces P7's no-op). Precedence per design §5:
@@ -6647,17 +6936,29 @@ def _enrich_one(row: dict, auto_min: float | None = None, field_filter=None,
                                            cand=field_filter(cand) if field_filter else cand)
             return
         # A 404'd mbid (typo'd manifest) falls through to the text tiers.
+    # A pack that left `artist` blank can't be text-matched (search needs an
+    # artist, and the per-field floor rejects a blank one) — so when it's blank,
+    # seed the query/scoring from the filename's Artist_Song convention. Seed
+    # only: fn/chash and the stored row are untouched, and the DISPLAYED values
+    # still come from the confirmed match. The exact-key tiers above don't need
+    # it (mbid/isrc identify without text).
+    ref = row
+    if not (row.get("artist") or "").strip():
+        derived = _artist_title_from_filename(fn)
+        if derived:
+            ref = {**row, **derived}
+
     if ids.get("isrc"):
-        cands = mb_match.rank_candidates(row, _mb_lookup_isrc(ids["isrc"]))
+        cands = mb_match.rank_candidates(ref, _mb_lookup_isrc(ids["isrc"]))
         if cands:
             meta_db.apply_enrichment_match(fn, chash, "matched", source="isrc",
                                            score=1.0, apply_mask=apply_mask,
                                            cand=field_filter(cands[0]) if field_filter else cands[0])
             return
 
-    ranked = mb_match.rank_candidates(row, _mb_search_recordings(row.get("artist"), row.get("title")))
+    ranked = mb_match.rank_candidates(ref, _mb_search_recordings(ref.get("artist"), ref.get("title")))
     best = ranked[0] if ranked else None
-    tier = mb_match.classify(row, best, best["score"], auto_min=auto_min) if best else "none"
+    tier = mb_match.classify(ref, best, best["score"], auto_min=auto_min) if best else "none"
     if tier == "auto":
         meta_db.apply_enrichment_match(fn, chash, "matched", source="text",
                                        score=best["score"], apply_mask=apply_mask,
@@ -6681,8 +6982,13 @@ def _background_enrich():
     `failed` rows whose backoff has elapsed; a transport failure pauses it
     (state untouched, no attempt burned) and the next kick retries. Offline
     (kill-switch or the test env) skips phase 2 entirely. Never drains in a
-    loop — a dead network would make that spin forever."""
+    loop — a dead network would make that spin forever. Between songs it
+    honours the Stop button's cancel flag (phases 2 and 3), so a long trickle
+    can be halted without waiting for the whole queue to drain."""
     _enrich_status["processed"] = 0
+    _enrich_status["total"] = 0
+    _enrich_status["matched"] = 0
+    _enrich_status["current"] = None
     # User settings gate the BACKGROUND matcher only (the review modal's
     # manual search/fix stays available when it's off); read once per pass,
     # up front so the pending query can honour the per-field apply mask
@@ -6747,11 +7053,17 @@ def _background_enrich():
             continue
         seen_filenames.add(fn)
         queue.append(row)
+    _enrich_status["total"] = len(queue)
     for row in queue:
+        if _enrich_cancel.is_set():
+            log.info("enrichment: pass cancelled by user after %d matched", matched)
+            break
+        _enrich_status["current"] = row.get("filename")
         try:
             _enrich_one(row, auto_min=auto_min, field_filter=field_filter,
                         apply_mask=apply_mask)
             matched += 1
+            _enrich_status["matched"] = matched
         except EnrichTransportError as e:
             log.info("enrichment: network unavailable, pass paused (%s)", e)
             break
@@ -6765,6 +7077,7 @@ def _background_enrich():
                     source="error", bump_attempts=True)
             except Exception:
                 pass
+    _enrich_status["current"] = None
     if mb_on and (pending or retriable):
         log.info("Enrichment pass: %d rows stamped, %d matched", len(pending), matched)
 
@@ -6784,6 +7097,9 @@ def _background_enrich():
         return
     fetched = 0
     for row in art_rows:
+        if _enrich_cancel.is_set():
+            log.info("enrichment: art pass cancelled by user after %d fetched", fetched)
+            break
         try:
             fetched += 1 if _enrich_art_one(row) else 0
         except EnrichTransportError as e:
@@ -6808,6 +7124,10 @@ def _kick_enrich() -> bool:
         if _enrich_status["running"]:
             _enrich_pending_pass = True
             return False
+        # A fresh pass supersedes any prior Stop — clear the flag so the new
+        # pass isn't cancelled the instant it checks (a stale set() from a
+        # cancelled-then-re-kicked run would otherwise abort it immediately).
+        _enrich_cancel.clear()
         _enrich_status["running"] = True
     _enrich_thread = threading.Thread(target=_enrich_runner, daemon=True)
     _enrich_thread.start()
@@ -6822,6 +7142,15 @@ def _enrich_runner():
         except Exception:
             log.exception("background enrichment failed unexpectedly")
         with _enrich_kick_lock:
+            _enrich_status["current"] = None
+            if _enrich_cancel.is_set():
+                # Stop: abandon any coalesced follow-up and clear the flag so the
+                # next kick starts clean. The current pass already broke out of
+                # its loop between songs (see _background_enrich).
+                _enrich_pending_pass = False
+                _enrich_cancel.clear()
+                _enrich_status["running"] = False
+                return
             if not _enrich_pending_pass:
                 _enrich_status["running"] = False
                 return
@@ -7309,6 +7638,13 @@ def enrichment_status():
         "last_pass_at": _enrich_status["last_pass_at"],
         "states": meta_db.enrichment_state_counts(),
         "total_songs": meta_db.count(),
+        # Per-pass matching progress for the "Refresh Metadata" batch bar +
+        # per-tile badges (total = songs queued to match this pass, matched =
+        # done so far, current = the one being matched now).
+        "total": _enrich_status.get("total", 0),
+        "matched": _enrich_status.get("matched", 0),
+        "current": _enrich_status.get("current"),
+        "cancelling": _enrich_cancel.is_set(),
     }
 
 
@@ -7327,10 +7663,70 @@ def api_enrichment_song(filename: str):
 
 @app.post("/api/enrichment/kick")
 def api_enrichment_kick():
-    """The Settings "Match now" button: request an enrichment pass without
-    waiting for a scan to complete. Single-flight + coalescing like every
-    other kick — spamming it queues at most one follow-up pass."""
+    """The Settings "Match now" button AND the library's "Refresh Metadata"
+    button: request an enrichment pass without waiting for a scan to complete.
+    Processes the songs that still need it (unscanned/changed + retriable
+    failures) — already-matched songs are left alone, so on a fully-matched
+    library this is a fast no-op. Single-flight + coalescing like every other
+    kick — spamming it queues at most one follow-up pass."""
     return {"started": _kick_enrich()}
+
+
+@app.post("/api/enrichment/cancel")
+def api_enrichment_cancel():
+    """Stop button on the "Refresh Metadata" batch: signal the running pass to
+    halt after the current song (an in-flight ≤1/s lookup can't be interrupted,
+    but no new one is started) and drop any coalesced follow-up. A no-op when
+    nothing is running."""
+    was_running = _enrich_status["running"]
+    if was_running:
+        _enrich_cancel.set()
+    return {"ok": True, "was_running": was_running}
+
+
+@app.post("/api/enrichment/rematch")
+def api_enrichment_rematch(data: dict = Body(...)):
+    """The library "Refresh Metadata" button: force a fresh re-match of the
+    songs the grid is SHOWING (its visible/filtered window). Resets each to
+    `unscanned` so the next pass re-fetches it from scratch — EXCEPT user-pinned
+    `manual` rows, which are never auto-overwritten (apply_enrichment_match
+    guards that) — then kicks one pass. Scoped to the visible set on purpose:
+    fast (dozens of songs), visible (tiles animate), and it can't blow the whole
+    ≤1/s rate budget on a 1000-song library the way a full re-sweep would.
+    Returns the filenames actually queued so the UI badges exactly those."""
+    raw = (data or {}).get("filenames") or []
+    fns = [str(f) for f in raw if isinstance(f, str)][:500]
+    queued: list[str] = []
+    for fn in fns:
+        song = meta_db.enrichment_song_row(fn)
+        if not song:
+            continue
+        h = meta_db.enrichment_content_hash(
+            song["artist"], song["title"], song["album"], song["duration"])
+        # allow_manual_overwrite=False → a manual pin is left as-is (returns
+        # False), everything else resets to unscanned (returns True).
+        if meta_db.apply_enrichment_match(fn, h, "unscanned",
+                                          allow_manual_overwrite=False):
+            queued.append(fn)
+    started = _kick_enrich() if queued else False
+    return {"queued": queued, "count": len(queued), "started": started}
+
+
+@app.post("/api/enrichment/states")
+def api_enrichment_states(data: dict = Body(...)):
+    """Per-tile match states for the grid's VISIBLE window during a metadata
+    refresh: the client posts the filenames it is showing and gets back each
+    one's match_state (+ the song being matched right now, + whether a pass is
+    running), so a card can animate queued→working→result without a per-song
+    round-trip. Read-only — safe for demo visitors (no network, no mutation)."""
+    raw = (data or {}).get("filenames") or []
+    # Bound the batch: a visible grid window is dozens of cards; cap defensively.
+    fns = [str(f) for f in raw if isinstance(f, str)][:500]
+    return {
+        "states": meta_db.enrichment_states_for(fns),
+        "current": _enrich_status.get("current"),
+        "running": _enrich_status["running"],
+    }
 
 
 @app.post("/api/enrichment/refresh/{filename:path}")
@@ -7428,13 +7824,16 @@ def api_enrichment_pick(filename: str, data: dict = Body(...)):
 
 @app.get("/api/enrichment/search")
 def api_enrichment_search(artist: str = "", title: str = "", limit: int = 8,
-                          filename: str = ""):
+                          filename: str = "", duration: float = 0.0):
     """Manual-search proxy to MusicBrainz (throttled + identified like the
     background matcher — a user typing in the drawer must not sidestep the
     rate limit). `filename` optionally scores results against that song's
     stored identity (year/duration corroboration) instead of just the typed
-    text. Sync route on purpose: FastAPI runs it in the threadpool, so the
-    throttle's sleep never blocks the event loop."""
+    text. `duration` (seconds) lets a caller that HAS the audio but no library
+    row — e.g. the editor's create modal, which holds the master track — pass
+    its length so the studio take ranks above live/extended cuts. Sync route on
+    purpose: FastAPI runs it in the threadpool, so the throttle's sleep never
+    blocks the event loop."""
     if not (artist.strip() or title.strip()):
         raise HTTPException(status_code=400, detail="artist or title required")
     limit = max(1, min(int(limit), 25))
@@ -7448,7 +7847,98 @@ def api_enrichment_search(artist: str = "", title: str = "", limit: int = 8,
         ref = meta_db.enrichment_song_row(filename)
     if ref is None:
         ref = {"artist": artist, "title": title}
+    # A caller-supplied duration corroborates the take even without a library row.
+    if duration and duration > 0 and not ref.get("duration"):
+        ref = dict(ref)
+        ref["duration"] = duration
     return {"candidates": mb_match.rank_candidates(ref, cands)}
+
+
+@app.post("/api/enrichment/identify")
+async def api_enrichment_identify(request: Request):
+    """Identify a song by AUDIO FINGERPRINT (AcoustID) rather than text — the
+    reliable way to get the EXACT recording/version (the studio take, not a live
+    bootleg or an extended cut). Upload the master audio; returns candidates in
+    the same shape as /search, so the review UI and the editor's Match popup can
+    render fingerprint hits identically. 412 `needs_setup` when the user hasn't
+    opted in / has no key (the UI nudges them to Settings); 503 when it's set up
+    but the fpcalc Chromaprint binary is missing or the network is off. Async so
+    the multipart is size-capped BEFORE spooling; the blocking fpcalc subprocess
+    + AcoustID HTTP run in the threadpool via run_in_executor."""
+    gate = _acoustid_gate()
+    if gate is not None:
+        return gate
+    # Pre-parse Content-Length guard — reject an oversized body before Starlette
+    # spools the multipart to temp disk (mirrors the song-upload endpoint). The
+    # per-part cap below is the authoritative limit; this is the fast up-front no.
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            cl_int = int(cl)
+        except ValueError:
+            return JSONResponse({"error": "Invalid Content-Length header"}, status_code=400)
+        if cl_int > _ACOUSTID_MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD_SLACK:
+            return JSONResponse({"error": "audio upload too large (256 MB max)"}, status_code=413)
+    try:
+        form = await request.form(max_part_size=_ACOUSTID_MAX_UPLOAD_BYTES)
+    except Exception:
+        return JSONResponse({"error": "audio upload too large (256 MB max)"}, status_code=413)
+    file = form.get("file")
+    if not isinstance(file, UploadFile):
+        raise HTTPException(status_code=400, detail="missing file upload")
+    import tempfile
+    ext = (Path(file.filename or "").suffix or ".bin").lower()
+    tmpdir = tempfile.mkdtemp(prefix="feedback_acoustid_")
+    tmp = os.path.join(tmpdir, "audio" + ext)
+    try:
+        total = 0
+        with open(tmp, "wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _ACOUSTID_MAX_UPLOAD_BYTES:
+                    return JSONResponse(
+                        {"error": "audio upload too large (256 MB max)"}, status_code=413)
+                fh.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="empty upload")
+        # fpcalc subprocess + AcoustID HTTP are blocking — off the event loop.
+        cands = await asyncio.get_event_loop().run_in_executor(
+            None, _identify_by_fingerprint, tmp)
+    except EnrichTransportError as e:
+        return JSONResponse({"error": "acoustid unavailable", "detail": str(e)},
+                            status_code=503)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return {"candidates": cands}
+
+
+@app.post("/api/enrichment/identify/{filename:path}")
+def api_enrichment_identify_song(filename: str):
+    """Identify an EXISTING library song by AUDIO FINGERPRINT — the library-side
+    counterpart to /api/enrichment/identify (which takes an upload). Fingerprints
+    the song's own master audio on disk (the manual "Identify by audio" action in
+    the Fix-metadata / match-review flow). Same candidate shape as /search, so the
+    review UI renders fingerprint hits like text hits. Same 412/503 gating; 404
+    when the song has no full-mix audio to fingerprint."""
+    gate = _acoustid_gate()
+    if gate is not None:
+        return gate
+    audio = _song_audio_file(filename)
+    if not audio:
+        return JSONResponse(
+            {"error": "no audio",
+             "detail": "couldn't find this song's master audio to fingerprint "
+                       "(a stems-only pack has no full mix to identify)."},
+            status_code=404)
+    try:
+        cands = _identify_by_fingerprint(audio)
+    except EnrichTransportError as e:
+        return JSONResponse({"error": "acoustid unavailable", "detail": str(e)},
+                            status_code=503)
+    return {"candidates": cands}
 
 
 @app.get("/api/startup-status")
@@ -9797,6 +10287,17 @@ def _default_settings():
         # the external browser, never media delivered in-app.
         "artist_pages_enabled": True,
         "artist_external_links": False,
+        # Audio fingerprinting (AcoustID + Chromaprint). OPT-IN, default OFF.
+        # Text matching (MusicBrainz) can't reliably pick the exact recording
+        # for a song with many comp/live/reissue takes (especially a
+        # non-title-track — the title can't find the album); fingerprinting
+        # reads the audio itself and resolves the EXACT recording. Needs the
+        # user's own free AcoustID application key
+        # (https://acoustid.org/new-application) plus the `fpcalc` binary. The
+        # key lives here (settings) — not only an env var — so a user can set it
+        # themselves in the UI; $ACOUSTID_API_KEY stays a server-wide fallback.
+        "acoustid_enabled": False,
+        "acoustid_api_key": "",
     }
 
 
@@ -9835,7 +10336,7 @@ def get_tunings():
 @app.get("/api/settings")
 def get_settings():
     cfg = _load_config(CONFIG_DIR / "config.json")
-    return cfg if cfg is not None else _default_settings()
+    return settings_with_instrument_profiles(cfg if cfg is not None else _default_settings())
 
 
 @app.post("/api/settings")
@@ -9971,13 +10472,24 @@ def save_settings(data: dict):
                       "enrich_apply_names", "enrich_apply_year",
                       "enrich_apply_genres", "enrich_apply_art",
                       # Artist pages (PR-B): page on/off + external-links opt-in.
-                      "artist_pages_enabled", "artist_external_links"):
+                      "artist_pages_enabled", "artist_external_links",
+                      # AcoustID audio-fingerprinting opt-in (default off).
+                      "acoustid_enabled"):
         if _bool_key in data:
             raw = data[_bool_key]
             if raw is not None:
                 if not isinstance(raw, bool):
                     return {"error": f"{_bool_key} must be a boolean"}
                 updates[_bool_key] = raw
+    if "acoustid_api_key" in data:
+        # Free AcoustID application key (opaque token). null is a no-op, empty
+        # string clears; length-capped so a bad POST can't bloat config.json.
+        # Never logged. The matcher trims + validates presence at read time.
+        raw = data["acoustid_api_key"]
+        if raw is not None:
+            if not isinstance(raw, str) or len(raw) > 128:
+                return {"error": "acoustid_api_key must be a string (at most 128 chars)"}
+            updates["acoustid_api_key"] = raw.strip()
     if "enrich_review_order" in data:
         raw = data["enrich_review_order"]
         if raw is not None:
@@ -10046,6 +10558,38 @@ def save_settings(data: dict):
             else:
                 return {"error": "tuning must be a name (string) or a list of semitone offsets"}
 
+    if "pathway" in data:
+        raw = data["pathway"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in PROFILE_PATHWAYS:
+                return {"error": "pathway must be one of songs, practice, learn, studio"}
+            updates["pathway"] = raw
+
+    _profile_patch = None
+    if "instrument_profiles" in data:
+        raw = data["instrument_profiles"]
+        if raw is not None:
+            if not isinstance(raw, dict):
+                return {"error": "instrument_profiles must be an object"}
+            # Validate each PROVIDED profile individually and keep the patch
+            # PARTIAL — /api/settings is a partial-merge endpoint, so updating one
+            # profile must NOT reset the others to defaults. Merged over the
+            # persisted profiles inside the lock below (not via the wholesale
+            # `updates` merge, which would clobber the unspecified ones).
+            _profile_patch = {}
+            for _pid, _praw in raw.items():
+                if _pid not in PROFILE_IDS:
+                    return {"error": f"unknown instrument profile: {_pid}"}
+                _prof, _perr = normalize_instrument_profile(_pid, _praw)
+                if _perr:
+                    return {"error": _perr}
+                _profile_patch[_pid] = _prof
+    if "active_instrument_profile" in data:
+        raw = data["active_instrument_profile"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in PROFILE_IDS:
+                return {"error": "active_instrument_profile must be one of guitar-lead, guitar-rhythm, bass"}
+            updates["active_instrument_profile"] = raw
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Critical section — the read-merge-write must be atomic. FastAPI runs
     # sync handlers in a threadpool, so two concurrent partial POSTs (e.g.
@@ -10062,6 +10606,29 @@ def save_settings(data: dict):
         if cfg is None:
             cfg = _default_settings()
         cfg.update(updates)
+        if _profile_patch is not None:
+            # Merge the validated partial over the persisted profiles so a
+            # single-profile update leaves the others intact (a fresh config
+            # falls back to the built-in defaults for the unspecified ones).
+            _existing, _ = normalize_instrument_profiles(cfg.get("instrument_profiles"))
+            if _existing is None:
+                _existing = {}
+            _existing.update(_profile_patch)
+            cfg["instrument_profiles"] = _existing
+        # Only canonicalize/persist the instrument profiles when this save
+        # actually touches them (or the config already carries them). GET always
+        # virtualizes profiles via settings_with_instrument_profiles, so a save
+        # that doesn't touch instrument settings must stay a plain partial merge
+        # — otherwise an empty (or unrelated) POST would freeze the default
+        # profiles into the on-disk config.
+        _profile_keys = ("instrument", "string_count", "tuning", "reference_pitch",
+                         "pathway", "instrument_profiles", "active_instrument_profile")
+        if "instrument_profiles" in cfg or any(k in updates for k in _profile_keys):
+            try:
+                cfg = apply_flat_instrument_patch_to_profiles(cfg, updates)
+            except ValueError as exc:
+                return {"error": str(exc)}
+            cfg = settings_with_instrument_profiles(cfg)
         _atomic_write_file(config_file, json.dumps(cfg, indent=2).encode("utf-8"))
     return {"message": ". ".join(messages) if messages else "Settings saved"}
 
@@ -10073,7 +10640,8 @@ def save_settings(data: dict):
 _RESETTABLE_SETTINGS_KEYS = frozenset({
     "default_arrangement", "demucs_server_url", "master_difficulty",
     "av_offset_ms", "countdown_before_song", "miss_penalty", "fail_behavior",
-    "reference_pitch", "instrument", "string_count", "tuning",
+    "reference_pitch", "instrument", "string_count", "tuning", "pathway",
+    "instrument_profiles", "active_instrument_profile",
     "achievements_enabled", "use_amp_sims",
 })
 
@@ -10098,6 +10666,16 @@ def reset_settings(data: dict):
         removed = [k for k in keys if k in cfg]
         for k in removed:
             del cfg[k]
+        # `pathway` is mirrored into every instrument profile, so deleting the
+        # flat key alone doesn't reset it — GET re-derives the value from the
+        # active profile. Reset it inside the persisted profiles too (back to the
+        # "songs" default), without disturbing the rest of the instrument config.
+        if "pathway" in keys and isinstance(cfg.get("instrument_profiles"), dict):
+            for prof in cfg["instrument_profiles"].values():
+                if isinstance(prof, dict):
+                    prof["pathway"] = "songs"
+            if "pathway" not in removed:
+                removed.append("pathway")
         _atomic_write_file(config_file, json.dumps(cfg, indent=2).encode("utf-8"))
     return {"message": "Settings reset", "reset": removed}
 
@@ -10189,6 +10767,18 @@ def _validate_server_config_types(cfg: dict) -> str | None:
                     return "server_config.tuning offsets must be ≤8 integers between -12 and 12"
             else:
                 return "server_config.tuning must be a name (string) or a list of semitone offsets"
+    if "pathway" in cfg:
+        v = cfg["pathway"]
+        if v is not None and (not isinstance(v, str) or v not in PROFILE_PATHWAYS):
+            return "server_config.pathway must be one of songs, practice, learn, studio"
+    if "instrument_profiles" in cfg:
+        profiles, error = normalize_instrument_profiles(cfg["instrument_profiles"])
+        if error:
+            return f"server_config.{error}"
+    if "active_instrument_profile" in cfg:
+        v = cfg["active_instrument_profile"]
+        if v is not None and (not isinstance(v, str) or v not in PROFILE_IDS):
+            return "server_config.active_instrument_profile must be one of guitar-lead, guitar-rhythm, bass"
     return None
 
 
@@ -10558,6 +11148,7 @@ def export_settings():
     server_config = _load_config(config_file)
     if server_config is None:
         server_config = _default_settings()
+    server_config = settings_with_instrument_profiles(server_config)
 
     # Snapshot the library DB + custom art FIRST: if the irreplaceable state
     # can't be captured, abort with an error rather than hand back a bundle
@@ -10800,7 +11391,7 @@ def import_settings(bundle: dict):
         with _settings_lock:
             _atomic_write_file(
                 CONFIG_DIR / "config.json",
-                json.dumps(server_config, indent=2).encode("utf-8"),
+                json.dumps(settings_with_instrument_profiles(server_config), indent=2).encode("utf-8"),
             )
     except OSError as e:
         # Phase-1 validation should have caught all foreseeable
