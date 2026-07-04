@@ -64,6 +64,32 @@ def test_prefers_studio_group_for_album_display():
     assert c["studio"] is True
 
 
+def test_earliest_studio_album_wins_over_later_one():
+    # Two studio "Album" groups (e.g. a later soundtrack typed Album). The
+    # ORIGINAL — earliest release year — must win the album pick, not whichever
+    # AcoustID happened to list first. (Real case: "Machine Head" over a later
+    # comp for "Smoke on the Water".)
+    resp = _resp(rg_title="Machine Head", year=1972)
+    resp["results"][0]["recordings"][0]["releasegroups"].insert(0, {
+        "id": "rg-late", "title": "Later Studio Album", "type": "Album",
+        "secondarytypes": [], "releases": [{"date": {"year": 1997}}],
+    })
+    c = a.parse_lookup_response(resp)[0]
+    assert c["album"] == "Machine Head"
+    assert c["year"] == "1972"
+
+
+def test_year_is_earliest_release_not_a_reissue():
+    # A group's first-listed release is often a reissue; the year must be the
+    # EARLIEST across the group's releases (real case: British Steel's 1980
+    # original, not a 2010 reissue listed first).
+    resp = _resp(rg_title="British Steel", year=2010)
+    resp["results"][0]["recordings"][0]["releasegroups"][0]["releases"].append(
+        {"date": {"year": 1980}})
+    c = a.parse_lookup_response(resp)[0]
+    assert c["year"] == "1980"
+
+
 def test_dedupes_recording_across_results():
     resp = _resp()
     resp["results"].append(dict(resp["results"][0]))  # same recording again

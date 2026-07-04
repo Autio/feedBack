@@ -27,7 +27,9 @@ ACOUSTID_API_ROOT = "https://api.acoustid.org/v2"
 # `+`-joined: a literal `+` in the value gets percent-encoded to %2B, which
 # AcoustID does NOT split into flags — it then attaches no recording metadata
 # and every hit comes back empty (verified: `+` → 0 recordings, space → 28).
-LOOKUP_META = "recordings releasegroups compress"
+# `releases` is what carries the per-release DATE (nested under each
+# releasegroup), which we need to pick the earliest original album + fill year.
+LOOKUP_META = "recordings releasegroups releases compress"
 
 # Mirror mb_match._SECONDARY_SKIP: release-group secondary types that mark a
 # non-canonical (live/comp/remix) release, so we can flag the studio take.
@@ -56,13 +58,37 @@ def _rg_is_studio(rg: dict) -> bool:
     return not (secs & _SECONDARY_SKIP)
 
 
+def _rg_earliest_year(rg: dict) -> "int | None":
+    """Earliest release YEAR in a release-group (min over its nested releases'
+    dates). None when no release carries a date. This is what separates the
+    original pressing from later reissues/comps sharing the same group."""
+    years = []
+    for rel in (rg.get("releases") or []):
+        d = (rel or {}).get("date")
+        if isinstance(d, dict) and d.get("year"):
+            try:
+                years.append(int(d["year"]))
+            except (TypeError, ValueError):
+                pass
+    return min(years) if years else None
+
+
 def _best_group(recording: dict) -> dict:
-    """Prefer a studio Album release-group for the display album, else the first."""
+    """Pick the display album: a clean studio Album first, and among those the
+    EARLIEST-released one — the original, not a later reissue or a compilation
+    that happens to be typed 'Album' (e.g. a soundtrack). This is what pulls
+    "Machine Head" ahead of a later comp for "Smoke on the Water". Falls back to
+    the first group when nothing is a studio album or nothing carries a date."""
     groups = [g for g in (recording.get("releasegroups") or []) if isinstance(g, dict)]
     if not groups:
         return {}
-    groups = sorted(groups, key=lambda g: 0 if _rg_is_studio(g) else 1)
-    return groups[0]
+
+    def sort_key(g):
+        yr = _rg_earliest_year(g)
+        # studio (0) before non-studio (1); then earliest year (undated last).
+        return (0 if _rg_is_studio(g) else 1, yr if yr is not None else 9999)
+
+    return sorted(groups, key=sort_key)[0]
 
 
 def _first_artist(recording: dict) -> str:
@@ -97,13 +123,8 @@ def parse_lookup_response(body: dict) -> list[dict]:
                 continue
             seen.add(rid)
             rg = _best_group(rec)
-            year = ""
-            for rel in (rg.get("releases") or []):
-                d = (rel or {}).get("date") or {}
-                y = d.get("year") if isinstance(d, dict) else None
-                if y:
-                    year = str(y)[:4]
-                    break
+            _yr = _rg_earliest_year(rg)
+            year = str(_yr) if _yr else ""
             dur = rec.get("duration")
             try:
                 duration = int(round(float(dur))) if dur else None
