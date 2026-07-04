@@ -240,6 +240,8 @@ _DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
     # anonymous demo visitors (they'd spend the shared rate limit).
     ("POST",   re.compile(r"^/api/enrichment/review/.+$")),
     ("POST",   re.compile(r"^/api/enrichment/kick$")),
+    ("POST",   re.compile(r"^/api/enrichment/cancel$")),
+    ("POST",   re.compile(r"^/api/enrichment/rematch$")),
     ("GET",    re.compile(r"^/api/enrichment/search$")),
     # Context menus (R2): the per-song re-match mutates the cache + spends
     # rate limit; Get-info exposes filesystem paths.
@@ -3004,6 +3006,26 @@ class MetadataDB:
                 "SELECT e.match_state, COUNT(*) FROM song_enrichment e "
                 "JOIN songs s ON s.filename = e.filename GROUP BY e.match_state").fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def enrichment_states_for(self, filenames: list[str]) -> dict:
+        """{filename: match_state} for the given songs — a never-enriched (or
+        unknown) filename is simply absent from the result. Powers the per-tile
+        badges on the "Refresh Metadata" batch: the grid polls only the
+        filenames in its visible window, not the whole library, so a card can
+        animate queued→working→result without a per-song round-trip."""
+        if not filenames:
+            return {}
+        out: dict = {}
+        with self._lock:
+            # Chunk under SQLite's variable limit so a huge visible window (or a
+            # hostile caller) can't overflow the single IN (...) parameter list.
+            for i in range(0, len(filenames), 400):
+                chunk = filenames[i:i + 400]
+                q = ("SELECT filename, match_state FROM song_enrichment "
+                     "WHERE filename IN (%s)" % ",".join("?" * len(chunk)))
+                for fn, st in self.conn.execute(q, chunk).fetchall():
+                    out[fn] = st
+        return out
 
     def enrichment_song_row(self, filename: str) -> dict | None:
         """The identity fields the matcher/scorer keys on, for one song."""
@@ -6131,7 +6153,16 @@ def _scan_runner():
 
 _enrich_kick_lock = threading.Lock()
 _enrich_pending_pass = False
-_enrich_status = {"running": False, "processed": 0, "last_pass_at": None}
+# processed = phase-1 stubs stamped this pass (legacy field). total/matched =
+# the phase-2 MATCHING progress the "Refresh Metadata" batch bar reads (the
+# slow, rate-limited part worth a progress readout); current = the song being
+# matched right now, which drives the per-tile "working" badge.
+_enrich_status = {"running": False, "processed": 0, "last_pass_at": None,
+                  "total": 0, "matched": 0, "current": None}
+# Cooperative cancel for the Stop button: the matching/art loops check it
+# between songs (an in-flight ≤1/s lookup can't be interrupted, but no new one
+# is started). Set by /api/enrichment/cancel, cleared when a fresh pass kicks.
+_enrich_cancel = threading.Event()
 # Minimum spacing between EXTERNAL lookups (design: ≤1 req/s + local cache).
 _ENRICH_MIN_INTERVAL = 1.1
 _enrich_last_fetch = 0.0
@@ -6588,6 +6619,35 @@ def _enrich_field_filter(cfg: dict):
     return lambda cand: {k: v for k, v in cand.items() if k not in blocked}
 
 
+# Strips a trailing tag parenthetical from a filename stem — "(440Hz)",
+# "(Live)", "(No Lead)", the retune/arrangement noise CDLC names carry.
+_FN_TAG_RE = re.compile(r"\s*\([^)]*\)")
+
+
+def _artist_title_from_filename(filename: str) -> dict | None:
+    """Derive artist + title from the CDLC filename convention
+    'Artist_Song-Title_v1_p.feedpak' — spaces written as hyphens WITHIN a
+    field, underscores separating Artist | Title | version/arrangement. Used
+    ONLY as a match SEED for packs whose own `artist` field is blank (a large
+    slice of community charts): text search needs an artist, and the filename
+    reliably carries it. This never becomes displayed metadata — the shown
+    values still come from the confirmed MusicBrainz match (provenance
+    'matched'), so nothing estimated is presented as author-set; if no match is
+    found, the pack stays exactly as-is. Returns None when the name doesn't fit
+    the convention (so a non-CDLC pack falls through untouched)."""
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    base = base.rsplit(".", 1)[0]                 # drop the extension
+    base = _FN_TAG_RE.sub("", base).strip()       # drop "(440Hz)" etc.
+    parts = [p for p in base.split("_") if p]
+    if len(parts) < 2:
+        return None
+    artist = parts[0].replace("-", " ").strip()
+    title = parts[1].replace("-", " ").strip()
+    if not artist or not title:
+        return None
+    return {"artist": artist, "title": title}
+
+
 def _enrich_one(row: dict, auto_min: float | None = None, field_filter=None,
                 apply_mask: str = "") -> None:
     """The matcher (P8; replaces P7's no-op). Precedence per design §5:
@@ -6632,17 +6692,29 @@ def _enrich_one(row: dict, auto_min: float | None = None, field_filter=None,
                                            cand=field_filter(cand) if field_filter else cand)
             return
         # A 404'd mbid (typo'd manifest) falls through to the text tiers.
+    # A pack that left `artist` blank can't be text-matched (search needs an
+    # artist, and the per-field floor rejects a blank one) — so when it's blank,
+    # seed the query/scoring from the filename's Artist_Song convention. Seed
+    # only: fn/chash and the stored row are untouched, and the DISPLAYED values
+    # still come from the confirmed match. The exact-key tiers above don't need
+    # it (mbid/isrc identify without text).
+    ref = row
+    if not (row.get("artist") or "").strip():
+        derived = _artist_title_from_filename(fn)
+        if derived:
+            ref = {**row, **derived}
+
     if ids.get("isrc"):
-        cands = mb_match.rank_candidates(row, _mb_lookup_isrc(ids["isrc"]))
+        cands = mb_match.rank_candidates(ref, _mb_lookup_isrc(ids["isrc"]))
         if cands:
             meta_db.apply_enrichment_match(fn, chash, "matched", source="isrc",
                                            score=1.0, apply_mask=apply_mask,
                                            cand=field_filter(cands[0]) if field_filter else cands[0])
             return
 
-    ranked = mb_match.rank_candidates(row, _mb_search_recordings(row.get("artist"), row.get("title")))
+    ranked = mb_match.rank_candidates(ref, _mb_search_recordings(ref.get("artist"), ref.get("title")))
     best = ranked[0] if ranked else None
-    tier = mb_match.classify(row, best, best["score"], auto_min=auto_min) if best else "none"
+    tier = mb_match.classify(ref, best, best["score"], auto_min=auto_min) if best else "none"
     if tier == "auto":
         meta_db.apply_enrichment_match(fn, chash, "matched", source="text",
                                        score=best["score"], apply_mask=apply_mask,
@@ -6666,8 +6738,13 @@ def _background_enrich():
     `failed` rows whose backoff has elapsed; a transport failure pauses it
     (state untouched, no attempt burned) and the next kick retries. Offline
     (kill-switch or the test env) skips phase 2 entirely. Never drains in a
-    loop — a dead network would make that spin forever."""
+    loop — a dead network would make that spin forever. Between songs it
+    honours the Stop button's cancel flag (phases 2 and 3), so a long trickle
+    can be halted without waiting for the whole queue to drain."""
     _enrich_status["processed"] = 0
+    _enrich_status["total"] = 0
+    _enrich_status["matched"] = 0
+    _enrich_status["current"] = None
     # User settings gate the BACKGROUND matcher only (the review modal's
     # manual search/fix stays available when it's off); read once per pass,
     # up front so the pending query can honour the per-field apply mask
@@ -6732,11 +6809,17 @@ def _background_enrich():
             continue
         seen_filenames.add(fn)
         queue.append(row)
+    _enrich_status["total"] = len(queue)
     for row in queue:
+        if _enrich_cancel.is_set():
+            log.info("enrichment: pass cancelled by user after %d matched", matched)
+            break
+        _enrich_status["current"] = row.get("filename")
         try:
             _enrich_one(row, auto_min=auto_min, field_filter=field_filter,
                         apply_mask=apply_mask)
             matched += 1
+            _enrich_status["matched"] = matched
         except EnrichTransportError as e:
             log.info("enrichment: network unavailable, pass paused (%s)", e)
             break
@@ -6750,6 +6833,7 @@ def _background_enrich():
                     source="error", bump_attempts=True)
             except Exception:
                 pass
+    _enrich_status["current"] = None
     if mb_on and (pending or retriable):
         log.info("Enrichment pass: %d rows stamped, %d matched", len(pending), matched)
 
@@ -6769,6 +6853,9 @@ def _background_enrich():
         return
     fetched = 0
     for row in art_rows:
+        if _enrich_cancel.is_set():
+            log.info("enrichment: art pass cancelled by user after %d fetched", fetched)
+            break
         try:
             fetched += 1 if _enrich_art_one(row) else 0
         except EnrichTransportError as e:
@@ -6793,6 +6880,10 @@ def _kick_enrich() -> bool:
         if _enrich_status["running"]:
             _enrich_pending_pass = True
             return False
+        # A fresh pass supersedes any prior Stop — clear the flag so the new
+        # pass isn't cancelled the instant it checks (a stale set() from a
+        # cancelled-then-re-kicked run would otherwise abort it immediately).
+        _enrich_cancel.clear()
         _enrich_status["running"] = True
     _enrich_thread = threading.Thread(target=_enrich_runner, daemon=True)
     _enrich_thread.start()
@@ -6807,6 +6898,15 @@ def _enrich_runner():
         except Exception:
             log.exception("background enrichment failed unexpectedly")
         with _enrich_kick_lock:
+            _enrich_status["current"] = None
+            if _enrich_cancel.is_set():
+                # Stop: abandon any coalesced follow-up and clear the flag so the
+                # next kick starts clean. The current pass already broke out of
+                # its loop between songs (see _background_enrich).
+                _enrich_pending_pass = False
+                _enrich_cancel.clear()
+                _enrich_status["running"] = False
+                return
             if not _enrich_pending_pass:
                 _enrich_status["running"] = False
                 return
@@ -7294,6 +7394,13 @@ def enrichment_status():
         "last_pass_at": _enrich_status["last_pass_at"],
         "states": meta_db.enrichment_state_counts(),
         "total_songs": meta_db.count(),
+        # Per-pass matching progress for the "Refresh Metadata" batch bar +
+        # per-tile badges (total = songs queued to match this pass, matched =
+        # done so far, current = the one being matched now).
+        "total": _enrich_status.get("total", 0),
+        "matched": _enrich_status.get("matched", 0),
+        "current": _enrich_status.get("current"),
+        "cancelling": _enrich_cancel.is_set(),
     }
 
 
@@ -7312,10 +7419,70 @@ def api_enrichment_song(filename: str):
 
 @app.post("/api/enrichment/kick")
 def api_enrichment_kick():
-    """The Settings "Match now" button: request an enrichment pass without
-    waiting for a scan to complete. Single-flight + coalescing like every
-    other kick — spamming it queues at most one follow-up pass."""
+    """The Settings "Match now" button AND the library's "Refresh Metadata"
+    button: request an enrichment pass without waiting for a scan to complete.
+    Processes the songs that still need it (unscanned/changed + retriable
+    failures) — already-matched songs are left alone, so on a fully-matched
+    library this is a fast no-op. Single-flight + coalescing like every other
+    kick — spamming it queues at most one follow-up pass."""
     return {"started": _kick_enrich()}
+
+
+@app.post("/api/enrichment/cancel")
+def api_enrichment_cancel():
+    """Stop button on the "Refresh Metadata" batch: signal the running pass to
+    halt after the current song (an in-flight ≤1/s lookup can't be interrupted,
+    but no new one is started) and drop any coalesced follow-up. A no-op when
+    nothing is running."""
+    was_running = _enrich_status["running"]
+    if was_running:
+        _enrich_cancel.set()
+    return {"ok": True, "was_running": was_running}
+
+
+@app.post("/api/enrichment/rematch")
+def api_enrichment_rematch(data: dict = Body(...)):
+    """The library "Refresh Metadata" button: force a fresh re-match of the
+    songs the grid is SHOWING (its visible/filtered window). Resets each to
+    `unscanned` so the next pass re-fetches it from scratch — EXCEPT user-pinned
+    `manual` rows, which are never auto-overwritten (apply_enrichment_match
+    guards that) — then kicks one pass. Scoped to the visible set on purpose:
+    fast (dozens of songs), visible (tiles animate), and it can't blow the whole
+    ≤1/s rate budget on a 1000-song library the way a full re-sweep would.
+    Returns the filenames actually queued so the UI badges exactly those."""
+    raw = (data or {}).get("filenames") or []
+    fns = [str(f) for f in raw if isinstance(f, str)][:500]
+    queued: list[str] = []
+    for fn in fns:
+        song = meta_db.enrichment_song_row(fn)
+        if not song:
+            continue
+        h = meta_db.enrichment_content_hash(
+            song["artist"], song["title"], song["album"], song["duration"])
+        # allow_manual_overwrite=False → a manual pin is left as-is (returns
+        # False), everything else resets to unscanned (returns True).
+        if meta_db.apply_enrichment_match(fn, h, "unscanned",
+                                          allow_manual_overwrite=False):
+            queued.append(fn)
+    started = _kick_enrich() if queued else False
+    return {"queued": queued, "count": len(queued), "started": started}
+
+
+@app.post("/api/enrichment/states")
+def api_enrichment_states(data: dict = Body(...)):
+    """Per-tile match states for the grid's VISIBLE window during a metadata
+    refresh: the client posts the filenames it is showing and gets back each
+    one's match_state (+ the song being matched right now, + whether a pass is
+    running), so a card can animate queued→working→result without a per-song
+    round-trip. Read-only — safe for demo visitors (no network, no mutation)."""
+    raw = (data or {}).get("filenames") or []
+    # Bound the batch: a visible grid window is dozens of cards; cap defensively.
+    fns = [str(f) for f in raw if isinstance(f, str)][:500]
+    return {
+        "states": meta_db.enrichment_states_for(fns),
+        "current": _enrich_status.get("current"),
+        "running": _enrich_status["running"],
+    }
 
 
 @app.post("/api/enrichment/refresh/{filename:path}")
