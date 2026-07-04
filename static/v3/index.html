@@ -122,7 +122,7 @@
          the inline brand is the no-JS fallback. -->
     <aside id="v3-sidebar" class="w-64 border-r border-fb-border/50 flex-col shrink-0 hidden md:flex">
         <div id="v3-brand" class="p-6">
-            <span class="font-extrabold tracking-tight text-fb-text text-xl">fee<span class="text-fb-primary">[dB]</span>ack</span>
+            <img src="/static/v3/brand/feedback-logo-light.png" alt="fee[dB]ack" style="width:100%;height:auto;display:block">
         </div>
         <nav id="v3-nav" class="flex-1 overflow-y-auto px-3 pb-6 space-y-6" aria-label="Primary"></nav>
     </aside>
@@ -426,6 +426,23 @@
                                 <option value="Lead">Lead</option>
                                 <option value="Rhythm">Rhythm</option>
                                 <option value="Bass">Bass</option>
+                            </select>
+                        </div>
+                    </div>
+                    <!-- Instrument pathway -->
+                    <div class="fb-srow">
+                        <span class="fb-srow-icon"><svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-1.447-.894L15 4m0 13V4m0 0L9 7"/></svg></span>
+                        <div class="fb-srow-main">
+                            <div class="fb-srow-title">Instrument pathway</div>
+                            <div class="fb-srow-desc">Preferred path for the selected instrument. This is remembered per instrument profile.</div>
+                        </div>
+                        <div class="fb-srow-control">
+                            <select id="setting-instrument-pathway" onchange="setInstrumentPathway(this.value)"
+                                class="bg-dark-700 border border-gray-800 rounded-xl px-3 py-2.5 text-sm text-gray-300 outline-none">
+                                <option value="songs">Songs</option>
+                                <option value="practice">Practice</option>
+                                <option value="learn">Learn</option>
+                                <option value="studio">Studio</option>
                             </select>
                         </div>
                     </div>
@@ -771,6 +788,13 @@
                             </div>
                             <div class="text-[11px] text-gray-600 mt-1">What a confident match may fill in on its own — matches you confirm in the review queue always apply in full.</div>
                         </div>
+                        <!-- Audio fingerprint (AcoustID) — opt-in, default OFF. Wired by match-review.js. -->
+                        <div class="fb-srow-wide mb-1">
+                            <div class="text-[10px] uppercase tracking-wide text-gray-500 mb-1">Audio fingerprint (AcoustID)</div>
+                            <label class="flex items-center gap-2 text-xs text-gray-400 mb-1"><input type="checkbox" id="acoustid-enabled" class="rounded border-gray-600 bg-dark-700 text-accent"> Identify by audio — reads the recording itself for the exact version (studio vs live/extended)</label>
+                            <input type="text" id="acoustid-api-key" placeholder="AcoustID application key" class="w-full bg-dark-700 border border-gray-800 rounded-xl px-2 py-1.5 text-xs text-gray-300 outline-none">
+                            <div class="text-[11px] text-gray-600 mt-1">Opt-in. Get a free key at acoustid.org/new-application; the fpcalc (Chromaprint) binary must be on the server's PATH.</div>
+                        </div>
                         <div class="grid grid-cols-2 gap-2 mb-1 text-xs text-gray-400 fb-srow-wide">
                             <label class="flex items-center gap-2">Review queue order
                                 <select id="enrich-review-order" class="bg-dark-700 border border-gray-800 rounded-xl px-2 py-1.5 text-xs text-gray-300 outline-none">
@@ -783,6 +807,19 @@
                         <div class="fb-srow-control">
                             <button id="enrich-match-now" class="bg-dark-600 hover:bg-dark-500 px-5 py-2.5 rounded-xl text-sm text-gray-300 transition">Match Now</button>
                             <span id="enrich-status" class="text-xs text-gray-500"></span>
+                        </div>
+                    </div>
+                    <!-- Artist pages (PR-B — wired by static/v3/match-review.js). Sits
+                         beside the Metadata matching card; the Settings→Library tab
+                         regroup is a separate PR. -->
+                    <div class="fb-srow fb-srow-stack">
+                        <div class="fb-srow-main">
+                            <div class="fb-srow-title">Artist pages</div>
+                            <div class="fb-srow-desc">A page for every artist in your library — their songs, albums and your practice progress, built entirely from your local collection. External links (official site, tour dates, videos, social) come from one MusicBrainz lookup per matched artist and always open in your browser — nothing plays in-app, and they stay off until you opt in.</div>
+                        </div>
+                        <div class="grid grid-cols-2 gap-2 mb-1 text-xs text-gray-400 fb-srow-wide">
+                            <label class="flex items-center gap-2"><input type="checkbox" id="artist-pages-enabled" checked class="rounded border-gray-600 bg-dark-700 text-accent"> Artist pages</label>
+                            <label class="flex items-center gap-2"><input type="checkbox" id="artist-external-links" class="rounded border-gray-600 bg-dark-700 text-accent"> Show external links (opens your browser)</label>
                         </div>
                     </div>
                     <!-- Backup -->
@@ -1225,6 +1262,9 @@
     <!-- Before songs.js: the songs toolbar calls the match-review chip hook
          on build, so the module must already be registered. -->
     <script src="/static/v3/match-review.js"></script>
+    <!-- Before songs.js: the drawer art click + card ⋮ "Change cover…" open
+         the cover picker (window.__fbOpenImagePicker). -->
+    <script src="/static/v3/image-picker.js"></script>
     <script src="/static/v3/songs.js"></script>
     <script src="/static/v3/lessons.js"></script>
     <script src="/static/v3/dashboard.js"></script>

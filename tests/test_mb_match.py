@@ -145,11 +145,40 @@ def test_rank_candidates_orders_by_our_score():
     assert all("score" in c for c in ranked)
 
 
+def test_rank_candidates_studio_preference_is_dropped_for_live_charts():
+    """Tied-score candidates: a studio chart prefers the studio take, but a
+    LIVE chart must NOT be forced to the studio recording."""
+    studio = {"recording_id": "studio", "artist": "AC/DC", "title": "Highway to Hell",
+              "studio": True, "mb_score": 90}
+    live = {"recording_id": "live", "artist": "AC/DC", "title": "Highway to Hell",
+            "studio": False, "mb_score": 95}
+    # Studio chart -> studio take wins the tie (studio flag), despite lower mb_score.
+    studio_song = {"artist": "AC/DC", "title": "Highway to Hell"}
+    assert m.rank_candidates(studio_song, [live, studio])[0]["recording_id"] == "studio"
+    # Live chart -> studio preference dropped, so the higher-mb_score live take wins.
+    live_song = {"artist": "AC/DC", "title": "Highway to Hell (Live at Donington)"}
+    assert m.rank_candidates(live_song, [studio, live])[0]["recording_id"] == "live"
+
+
 # ── query building ────────────────────────────────────────────────────────────
 
 def test_build_recording_query_denoises_and_quotes():
     q = m.build_recording_query("ACDC", 'Thunderstruck (v2)')
-    assert q == 'recording:"thunderstruck" AND artist:"acdc"'
+    # Live-only recordings are excluded — the studio take is never tagged Live,
+    # and it's the biggest source of junk in a flat recording search.
+    assert q == 'recording:"thunderstruck" AND artist:"acdc" AND -secondarytype:Live'
+
+
+def test_build_recording_query_keeps_live_for_live_charts():
+    """A chart that IS a live take must NOT get the live filter, or its only
+    correct recording is excluded. A bare title word ("Live and Let Die") is a
+    real word, not a marker, so it still filters."""
+    live = m.build_recording_query("AC/DC", "Highway to Hell (Live at Donington)")
+    assert "-secondarytype:Live" not in live
+    assert 'recording:"highway to hell"' in live
+    # A real word "live" in the title is not a live marker → still filtered.
+    bare = m.build_recording_query("Wings", "Live and Let Die")
+    assert "-secondarytype:Live" in bare
 
 
 def test_build_recording_query_escapes_and_handles_missing_artist():
@@ -198,6 +227,29 @@ def test_parse_recording_doc_normalizes():
     assert c["isrc"] == "AUAP09000045"
     assert c["genres"] == ["hard rock", "rock"]
     assert c["mb_score"] == 98
+
+
+def test_best_release_prefers_official_single_over_unofficial_album():
+    """An OFFICIAL single/EP must outrank an UNofficial bootleg album for the
+    canonical album/year: official comes before the studio-album preference, so
+    a single-only song is never seeded from a bootleg. (`(clean, status_ok, …)`
+    would wrongly pick the bootleg.)"""
+    doc = {
+        "id": "rec-x", "title": "One-Off", "score": 90,
+        "artist-credit": [
+            {"name": "A", "joinphrase": "",
+             "artist": {"id": "a", "name": "A", "sort-name": "A"}}],
+        "releases": [
+            {"id": "rel-boot", "title": "Boot LP", "status": "Bootleg",
+             "date": "1990-01-01", "release-group": {"primary-type": "Album"}},
+            {"id": "rel-single", "title": "The Single", "status": "Official",
+             "date": "1988-01-01", "release-group": {"primary-type": "Single"}},
+        ],
+    }
+    c = m.parse_recording_doc(doc)
+    assert c["release_id"] == "rel-single"
+    assert c["album"] == "The Single"
+    assert c["studio"] is False   # a Single isn't a clean studio ALBUM
 
 
 def test_parse_recording_doc_joined_artist_credit():

@@ -35,9 +35,52 @@
     // ── Ambient chip + the Settings card's status line ───────────────────────
     // songs.js renders `#v3-songs-match-review` (hidden) in its toolbar and
     // calls window.__fbMatchReviewChip() after each toolbar build; review
-    // actions here re-call it. The same fetch feeds the Settings status line.
+    // actions here re-call it. The same fetch feeds the Settings status line
+    // and, while a pass is running, a quiet toolbar progress line (below).
     // Silent on failure — surfaces just stay as they are.
     let _chipBusy = false;
+    let _pollTimer = null;   // 5s status poll, alive ONLY while a pass runs
+
+    // Quiet library-visible progress (launch polish): a plain text line next
+    // to the review chip while the background pass is working through the
+    // queue — "Matching your library — X of Y". No toast, no sound; it simply
+    // disappears when the pass finishes (hearing-safe, design §11).
+    function _setProgressLine(running, states, total) {
+        let el = document.getElementById('v3-songs-match-progress');
+        const unscanned = states.unscanned || 0;
+        if (!running || unscanned <= 0 || total <= 0) {
+            if (el) el.remove();
+            return;
+        }
+        if (!el) {
+            const chip = document.getElementById('v3-songs-match-review');
+            if (!chip || !chip.parentElement) return;   // songs toolbar not on screen
+            el = document.createElement('span');
+            el.id = 'v3-songs-match-progress';
+            el.className = 'text-xs text-fb-textDim';
+            chip.insertAdjacentElement('afterend', el);
+        }
+        el.textContent = 'Matching your library — ' + Math.max(0, total - unscanned) + ' of ' + total;
+    }
+
+    // One-time transparency toast (launch polish): the first time this
+    // install is observed actually matching a real library, say plainly what
+    // is contacted, where results live, and where the switch is. Wrapped like
+    // app.js's fbNotify calls so a blocked localStorage / absent notifier can
+    // never break the chip.
+    function _announceOnce(running, total) {
+        try {
+            if (!running || total <= 0) return;
+            if (localStorage.getItem('fb_enrich_announce_v1')) return;
+            localStorage.setItem('fb_enrich_announce_v1', '1');
+            window.fbNotify?.show({
+                title: 'Library matching is on',
+                message: 'Song info and covers come from MusicBrainz and Cover Art Archive, stored locally. Your files are never changed unless you choose to write to them. Adjust in Settings → Library.',
+                icon: '📚',
+            });
+        } catch (_) { /* storage/notifier unavailable — skip quietly */ }
+    }
+
     async function refreshChip() {
         if (_chipBusy) return;
         _chipBusy = true;
@@ -62,7 +105,24 @@
                 if (st.unscanned) parts.push(st.unscanned + ' queued');
                 line.textContent = (body.running ? 'Matching… · ' : '') + parts.join(' · ');
             }
-        } catch (_) { /* offline — leave as-is */ } finally {
+            const running = !!body.running;
+            const total = body.total_songs || 0;
+            _setProgressLine(running, st, total);
+            _announceOnce(running, total);
+            // Poll only while a pass is actually running; a single guarded
+            // interval, cleared the moment the pass stops (no leaks).
+            if (running && !_pollTimer) {
+                _pollTimer = setInterval(refreshChip, 5000);
+            } else if (!running && _pollTimer) {
+                clearInterval(_pollTimer);
+                _pollTimer = null;
+            }
+        } catch (_) {
+            // Offline — leave surfaces as they are, but stop any poll so a
+            // dead server isn't pinged every 5s forever (the next toolbar
+            // build / settings open restarts it if a pass is still running).
+            if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+        } finally {
             _chipBusy = false;
         }
     }
@@ -286,7 +346,8 @@
             '<div class="flex items-center justify-between gap-3 p-5 pt-3 border-t border-fb-border/40 shrink-0">' +
             '<div class="flex items-center gap-3">' +
             (_single ? '' : '<button data-mr-reject class="text-sm text-fb-textDim hover:text-fb-text">Not a match</button>') +
-            '<button data-mr-search-toggle class="text-sm text-fb-textDim hover:text-fb-text">Search instead…</button></div>' +
+            '<button data-mr-search-toggle class="text-sm text-fb-textDim hover:text-fb-text">Search instead…</button>' +
+            '<button data-mr-identify class="text-sm text-fb-primary hover:text-fb-primaryHi" title="Fingerprint this song\'s audio to find the exact recording">Identify by audio</button></div>' +
             '<div class="flex items-center gap-2">' +
             (_single ? '' : '<button data-mr-skip class="text-sm text-fb-textDim hover:text-fb-text px-3 py-2">Skip</button>') +
             ((song.candidates || []).length ? '<button data-mr-accept class="bg-fb-primary hover:bg-fb-primaryHi text-white px-4 py-2 rounded-md text-sm">Use selected</button>' : '') +
@@ -335,6 +396,7 @@
         const go = () => runSearch(panel, song);
         panel.querySelector('[data-mr-search-go]')?.addEventListener('click', go);
         input?.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+        panel.querySelector('[data-mr-identify]')?.addEventListener('click', () => runIdentify(panel, song));
     }
 
     // Silent-on-success: the chart just leaves the queue and the next one
@@ -387,6 +449,52 @@
         });
     }
 
+    // "Identify by audio" — fingerprint the song's OWN master audio (AcoustID)
+    // and render the hits into the same search-results area. The reliable path
+    // when text search can't tell the studio take from live/comp versions.
+    async function runIdentify(panel, song) {
+        const out = panel.querySelector('[data-mr-search-results]');
+        const sp = panel.querySelector('[data-mr-search-panel]');
+        if (!out) return;
+        sp?.classList.remove('hidden');   // give the results somewhere to render
+        out.innerHTML = '<p class="text-xs text-fb-textDim">Fingerprinting audio…</p>';
+        let body = null, status = 0;
+        try {
+            const r = await fetch('/api/enrichment/identify/' + enc(song.filename), { method: 'POST' });
+            status = r.status;
+            body = await r.json().catch(() => null);
+        } catch (_) { /* falls through to the no-results line */ }
+        // Honest states — never a fake hit.
+        if (status === 412 || (body && body.needs_setup)) {
+            out.innerHTML = '<p class="text-xs text-fb-textDim">Audio identification is off — enable AcoustID and add a free API key to use it.</p>';
+            return;
+        }
+        if (status === 404) {
+            out.innerHTML = "<p class=\"text-xs text-fb-textDim\">No full-mix audio to fingerprint for this song.</p>";
+            return;
+        }
+        if (status === 503) {
+            out.innerHTML = '<p class="text-xs text-fb-textDim">Audio identification is unavailable right now — try again.</p>';
+            return;
+        }
+        const cands = (body && body.candidates) || [];
+        if (!cands.length) {
+            out.innerHTML = '<p class="text-xs text-fb-textDim">No fingerprint match — try text search.</p>';
+            return;
+        }
+        out.innerHTML = '<div class="text-xs font-semibold uppercase tracking-wider text-fb-textDim mb-1">Fingerprint matches (AcoustID)</div>' +
+            cands.map((c, i) => candRowHtml(song, c, i, false)).join('');
+        out.querySelectorAll('[data-mr-cand]').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+                const cand = cands[Number(btn.getAttribute('data-mr-cand'))];
+                if (!cand) return;
+                await post('/api/enrichment/review/' + enc(song.filename) + '/pick',
+                    { candidate: cand });
+                settle(song);
+            });
+        });
+    }
+
     async function post(url, payload) {
         try {
             await fetch(url, {
@@ -415,14 +523,27 @@
             ['enrich-apply-year', 'enrich_apply_year'],
             ['enrich-apply-genres', 'enrich_apply_genres'],
             ['enrich-apply-art', 'enrich_apply_art'],
+            // Artist pages (PR-B): the page itself — local-only, default ON.
+            ['artist-pages-enabled', 'artist_pages_enabled'],
         ].map(([id, key]) => [document.getElementById(id), key]).filter(([el]) => el);
-        if (!toggles.length && !sel && !btn) return;
+        // Default-OFF toggles load with the opposite absent-key semantic
+        // (checked only when explicitly true): the external-links row is
+        // opt-IN per the dev-chat thread.
+        const optInToggles = [
+            ['artist-external-links', 'artist_external_links'],
+            // Audio fingerprinting is opt-in (needs a key + fpcalc), default OFF.
+            ['acoustid-enabled', 'acoustid_enabled'],
+        ].map(([id, key]) => [document.getElementById(id), key]).filter(([el]) => el);
+        const acoustidKeyEl = document.getElementById('acoustid-api-key');
+        if (!toggles.length && !optInToggles.length && !sel && !btn) return;
         (async () => {
             try {
                 const r = await fetch('/api/settings');
                 if (r.ok) {
                     const cfg = await r.json();
                     for (const [el, key] of toggles) el.checked = cfg[key] !== false;
+                    for (const [el, key] of optInToggles) el.checked = cfg[key] === true;
+                    if (acoustidKeyEl) acoustidKeyEl.value = cfg.acoustid_api_key || '';
                     if (sel) {
                         const t = Number(cfg.enrich_auto_threshold);
                         const want = Number.isFinite(t) ? t : 0.9;
@@ -442,11 +563,12 @@
             refreshChip();   // also fills #enrich-status
         })();
         const save = (key, value) => post('/api/settings', { [key]: value });
-        for (const [el, key] of toggles) {
+        for (const [el, key] of toggles.concat(optInToggles)) {
             el.addEventListener('change', () => save(key, !!el.checked));
         }
         sel?.addEventListener('change', () => save('enrich_auto_threshold', Number(sel.value)));
         order?.addEventListener('change', () => save('enrich_review_order', order.value));
+        acoustidKeyEl?.addEventListener('change', () => save('acoustid_api_key', acoustidKeyEl.value.trim()));
         btn?.addEventListener('click', async () => {
             await post('/api/enrichment/kick');
             const line = document.getElementById('enrich-status');
@@ -455,10 +577,34 @@
         });
     }
 
+    // Stop the 5s poll when the library screen is left — the progress line and
+    // chip only live in the songs toolbar, so polling off-screen is pure waste
+    // (benign but tidy). Re-entering v3-songs re-arms it: songs.js re-calls
+    // window.__fbMatchReviewChip() on screen enter, and we also refresh here so
+    // this stays self-contained. Same single-guarded-interval invariant as
+    // refreshChip — no double-interval, cleared to null.
+    function wireScreenTeardown() {
+        const sm = window.feedBack;
+        if (!sm || typeof sm.on !== 'function') return;
+        sm.on('screen:changed', (e) => {
+            const id = e && e.detail && e.detail.id;
+            if (id === 'v3-songs') {
+                refreshChip();   // returning while a pass runs re-arms the poll
+            } else if (_pollTimer) {
+                clearInterval(_pollTimer);
+                _pollTimer = null;
+            }
+        });
+    }
+
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', wireSettingsCard, { once: true });
+        document.addEventListener('DOMContentLoaded', () => {
+            wireSettingsCard();
+            wireScreenTeardown();
+        }, { once: true });
     } else {
         wireSettingsCard();
+        wireScreenTeardown();
     }
 
     window.__fbMatchReviewChip = refreshChip;
