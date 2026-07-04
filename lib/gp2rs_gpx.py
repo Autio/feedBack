@@ -121,10 +121,18 @@ def _parse_bcfs(bcfs: bytes) -> dict:
             while sc <= max_sectors:
                 s = _gi(po + 4 * sc); sc += 1
                 if s == 0: break
-                so = s * SECTOR
-                if HDR + so + SECTOR > len(data):
+                start = HDR + s * SECTOR
+                # Real .gpx files' final sector is a few bytes short of a full
+                # 0x1000 block: the BCFZ-declared decompressed size isn't
+                # sector-aligned, so the last (small) container file lands in a
+                # partial trailing sector. Clamp the read to the buffer end —
+                # the per-file size field (`fs`, applied below) trims any
+                # padding — matching canonical GPX readers (alphaTab /
+                # PyGuitarPro slice-and-clamp). Only a sector whose *start* is
+                # past the end is genuinely malformed.
+                if start < 0 or start >= len(data):
                     raise ValueError("GPX BCFS sector pointer out of range (malformed file)")
-                fb.extend(data[HDR + so: HDR + so + SECTOR])
+                fb.extend(data[start: min(start + SECTOR, len(data))])
             else:
                 raise ValueError("GPX BCFS sector chain too long (malformed file)")
             files[fn] = bytes(fb[:fs])
