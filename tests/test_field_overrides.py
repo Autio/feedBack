@@ -146,3 +146,74 @@ def test_compose_lock_filter_strips_locked_cand_keys(server):
     assert out["recording_id"] == "r" and out["title"] == "T" and out["album"] == "A"
     # no locks → base filter returned unchanged (zero-copy common path)
     assert server._compose_lock_filter(None, set()) is None
+
+
+# ── display overlay in the grid (slice 3) ─────────────────────────────────────
+# "Grid shows only overrides": the effective cell is the user's override else the
+# pack value. Display-only + keyset-safe — the seek stays on the raw column.
+
+def _grid(server, **kw):
+    songs, _ = server.meta_db.query_page(**kw)
+    return {s["filename"]: s for s in songs}
+
+
+def test_grid_shows_override_value_over_pack(server):
+    _put(server, "a.archive", title="Wrong Title", artist="Wrong",
+         album="Pack Album", year="1999")
+    server.meta_db.set_song_override("a.archive", "title", value="Right Title")
+    server.meta_db.set_song_override("a.archive", "artist", value="Right Artist")
+    server.meta_db.set_song_override("a.archive", "year", value="1979")
+    s = _grid(server)["a.archive"]
+    assert s["title"] == "Right Title"
+    assert s["artist"] == "Right Artist"
+    assert s["year"] == "1979"
+    assert s["album"] == "Pack Album"            # no override → pack value shows
+    assert s["_sort_title"] == "Wrong Title"     # raw title stashed for the cursor
+
+
+def test_grid_ignores_lock_only_override(server):
+    _put(server, "a.archive", title="Pack Title")
+    server.meta_db.set_song_override("a.archive", "title", locked=True)   # lock, no value
+    s = _grid(server)["a.archive"]
+    assert s["title"] == "Pack Title"            # a lock without a value never retitles
+    assert "_sort_title" not in s                # …and stashes nothing
+
+
+def test_override_beats_alias_relabel_for_artist(server):
+    _put(server, "a.archive", artist="ACDC")
+    server.meta_db.set_artist_alias("ACDC", "AC/DC")                 # P4 alias
+    assert _grid(server)["a.archive"]["artist"] == "AC/DC"          # alias applies alone
+    server.meta_db.set_song_override("a.archive", "artist", value="AC-DC (mine)")
+    assert _grid(server)["a.archive"]["artist"] == "AC-DC (mine)"   # override wins over alias
+
+
+def test_route_strips_private_sort_title(client, server):
+    _put(server, "a.archive", title="Pack")
+    server.meta_db.set_song_override("a.archive", "title", value="Shown")
+    row = next(s for s in client.get("/api/library?sort=title").json()["songs"]
+               if s["filename"] == "a.archive")
+    assert row["title"] == "Shown"
+    assert "_sort_title" not in row              # private keyset stash never leaks to the client
+
+
+def test_title_keyset_paging_is_complete_with_overrides(client, server):
+    # Raw titles A/B/C → title-sort order is A, B, C on the RAW column.
+    _put(server, "b.archive", title="B")
+    _put(server, "a.archive", title="A")
+    _put(server, "c.archive", title="C")
+    # Overrides that would reshuffle the order IF the cursor wrongly used the
+    # displayed value — the seek must stay on the raw title, so paging still
+    # covers every row exactly once (no skip/dupe).
+    server.meta_db.set_song_override("a.archive", "title", value="ZZZ")
+    server.meta_db.set_song_override("c.archive", "title", value="AAA")
+    seen, cursor = [], None
+    for _ in range(10):
+        url = "/api/library?sort=title&size=1" + (f"&after={cursor}" if cursor else "")
+        data = client.get(url).json()
+        if not data["songs"]:
+            break
+        seen.append(data["songs"][0]["filename"])
+        cursor = data["next_cursor"]
+        if not cursor:
+            break
+    assert sorted(seen) == ["a.archive", "b.archive", "c.archive"]   # each exactly once

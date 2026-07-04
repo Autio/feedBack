@@ -556,7 +556,13 @@ def next_library_cursor(sort: str, last_song: dict | None) -> str | None:
     key = "mtime" if col == "mtime" else col
     if key not in last_song or "filename" not in last_song:
         return None
-    return _encode_cursor([last_song[key], last_song["filename"]])
+    # A title display-override (Fix-metadata popup) replaces last_song["title"]
+    # for the card, but the keyset seek runs on the RAW title column — resume
+    # from the raw value query_page stashed (present only when the last row's
+    # title was overridden), so paging never skips/dupes.
+    val = (last_song["_sort_title"] if (key == "title" and "_sort_title" in last_song)
+           else last_song[key])
+    return _encode_cursor([val, last_song["filename"]])
 
 
 # Song-level "mastered" threshold — best accuracy across a song's arrangements
@@ -4156,6 +4162,15 @@ class MetadataDB:
         # per-tile state only paints while a pass runs. Cheap set membership like
         # favs/estd, so the misses stay visible at rest.
         um = self._unmatched_set(fns)
+        # Per-song display OVERRIDES (Fix-metadata popup, slice 3). "Grid shows
+        # only overrides": the effective cell is the user's override else the
+        # pack value — a matched MusicBrainz canon NEVER silently re-titles a
+        # card (canon lives in the Details drawer + art). Overlaid in Python
+        # over the visible window, keyset-safe exactly like the P4 alias re-label
+        # below: the seek still runs on the raw column (the one overridable
+        # keyset column, title, stashes its raw value for the cursor — see
+        # _sort_title / next_library_cursor).
+        omap = self.overrides_map(fns)
         # Canonical artist at display (P4): re-label the card's artist through the
         # alias override so "ACDC" reads as "AC/DC". Display-only — the row's sort
         # position (raw artist) is untouched, so a card can show a canonical name
@@ -4168,6 +4183,18 @@ class MetadataDB:
             s["unmatched"] = s["filename"] in um
             if amap:
                 s["artist"] = amap.get((s.get("artist") or "").lower(), s.get("artist"))
+            # Override wins over the pack AND the alias re-label — it's the user's
+            # explicit per-song choice. Only a non-empty override VALUE replaces a
+            # cell; a lock-only row (value None) leaves the displayed value alone.
+            ov = omap.get(s["filename"])
+            if ov:
+                for field in ("title", "artist", "album", "year"):
+                    cell = ov.get(field)
+                    val = cell.get("value") if cell else None
+                    if val:
+                        if field == "title":
+                            s["_sort_title"] = s["title"]   # raw title, for the keyset cursor
+                        s[field] = val
         # Grouped rows carry the ⚑ N (chart_count) + the work_key from the
         # materialized read-model, so the card can render the "N charts" chip and
         # address the Charts drawer (GET /api/work/{work_key}/charts) without a
@@ -8825,6 +8852,10 @@ async def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "
     # The cursor to resume after this page (effective sort folds in dir=desc).
     next_cursor = (next_library_cursor(_effective_keyset_sort(sort, dir), songs[-1])
                    if (is_local and songs) else None)
+    # Drop the private raw-title stash query_page attached for the cursor — it's
+    # an internal keyset detail, not part of the card payload.
+    for s in songs:
+        s.pop("_sort_title", None)
     return {"songs": songs, "total": total, "page": page, "size": size,
             "next_cursor": next_cursor}
 
