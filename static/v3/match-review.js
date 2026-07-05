@@ -608,8 +608,16 @@
             if (status) { status.className = 'text-xs leading-relaxed text-fb-accent'; status.textContent = 'Could not write to the file — try again.'; }
             return;
         }
-        // Keep the in-memory song + grid in step with what was written.
-        for (const [f] of DETAIL_FIELDS) song[f] = fields[f];
+        // Keep the in-memory song + grid in step with what was *persisted*, not
+        // the raw input: the server coerces a non-numeric/empty year to "" (see
+        // update_song_meta), so mirror that here or the grid card flashes the
+        // typed text (e.g. "abcd") until the next natural refresh corrects it.
+        const applied = { ...fields };
+        if ('year' in applied) {
+            const yr = /^[+-]?\d+$/.test(applied.year) ? parseInt(applied.year, 10) : 0;
+            applied.year = yr ? String(yr) : '';
+        }
+        for (const [f] of DETAIL_FIELDS) song[f] = applied[f];
         try { window.feedBack?.emit('library:changed', { reason: 'write' }); } catch (_) { }
         if (persisted) {
             const clear = {};
