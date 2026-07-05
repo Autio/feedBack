@@ -1007,7 +1007,7 @@
             // the group's work_key/chart_count and pre-ticks the shown chart.)
             if (id === '__fixmatch') { if (window.__fbFixMatch) window.__fbFixMatch(playTarget); return; }
             if (id === '__cover') {
-                if (window.__fbOpenImagePicker) window.__fbOpenImagePicker({ filename: playTarget.filename, title: playTarget.title || playTarget.filename });
+                if (window.__fbOpenImagePicker) window.__fbOpenImagePicker({ filename: playTarget.filename, title: playTarget.title || playTarget.filename, artist: playTarget.artist, album: playTarget.album });
                 return;
             }
             if (id === '__refreshmeta') {
@@ -3126,7 +3126,7 @@
             // when image-picker.js isn't loaded.
             artWrap.addEventListener('click', () => {
                 if (window.__fbOpenImagePicker) {
-                    window.__fbOpenImagePicker({ filename: song.filename, title: song.title || song.filename });
+                    window.__fbOpenImagePicker({ filename: song.filename, title: song.title || song.filename, artist: song.artist, album: song.album });
                 } else {
                     artFile.click();
                 }

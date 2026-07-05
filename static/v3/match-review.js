@@ -696,7 +696,7 @@
             '</div>';
         body.querySelector('[data-cover-open]')?.addEventListener('click', () => {
             if (window.__fbOpenImagePicker) {
-                window.__fbOpenImagePicker({ filename: song.filename, title: song.title || song.filename });
+                window.__fbOpenImagePicker({ filename: song.filename, title: song.title || song.filename, artist: song.artist, album: song.album });
             }
         });
     }

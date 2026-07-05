@@ -6547,6 +6547,36 @@ def _mb_search_recordings(artist, title, limit: int = 12) -> list[dict]:
     return cands
 
 
+def _mb_search_release_groups(query: str, limit: int = 8) -> list[dict]:
+    """Text search /release-group for the Change-cover picker: albums matching a
+    free query, each mapped to its Cover Art Archive front thumb. One request;
+    tiles whose CAA art is missing self-hide client-side (front-250 404s). Lets a
+    cover be found even for a song with no metadata match (the city-pop pile)."""
+    q = (query or "").strip()
+    if not q:
+        return []
+    body = _mb_http_get("release-group", {"query": q, "limit": limit})
+    out: list[dict] = []
+    for rg in ((body or {}).get("release-groups") or []):
+        rid = rg.get("id")
+        if not rid:
+            continue
+        # artist-credit is a list of {name, joinphrase, artist} (joinphrase glues
+        # collaborations) — reconstruct the credited name.
+        artist = "".join(
+            (c.get("name", "") + c.get("joinphrase", "")) if isinstance(c, dict) else str(c)
+            for c in (rg.get("artist-credit") or [])
+        ).strip()
+        title = rg.get("title") or ""
+        year = (rg.get("first-release-date") or "")[:4]
+        out.append({
+            "id": rid,
+            "label": " · ".join(x for x in (title, artist, year) if x) or title or "Cover",
+            "thumb_url": f"https://coverartarchive.org/release-group/{rid}/front-250",
+        })
+    return out
+
+
 # ── AcoustID audio fingerprinting (content-based identification) ──────────────
 # Optional path: requires the Chromaprint `fpcalc` binary AND an AcoustID API
 # key ($ACOUSTID_API_KEY). Both absent ⇒ graceful no-op; the text matcher runs.
@@ -12247,6 +12277,26 @@ async def get_song_art(filename: str, request: Request = None, source: str = "")
 # lane — never evicted, survives a re-match), "Pack original" DELETEs the
 # override, uploads keep the existing upload route.
 _ART_PICKER_MAX_CAA = 12
+
+
+@app.get("/api/song/{filename:path}/art/cover-search")
+def api_art_cover_search(filename: str, q: str = ""):
+    """Search Cover Art Archive (via MusicBrainz release-groups) for album covers
+    — powers the Change-cover picker's search box, so a cover can be found even
+    for a song with no metadata match (the unmatched city-pop pile, where
+    /art/candidates is empty). `q` defaults to the song's own artist + album/
+    title (romaji fallback applied). Read-only; the picker renders the thumbs and
+    applies a pick through the existing /art/url route."""
+    query = (q or "").strip()
+    if not query:
+        pack = meta_db.pack_fields(meta_db._canonical_song_filename(filename))
+        query = " ".join(x for x in (pack.get("artist"), pack.get("album") or pack.get("title")) if x).strip()
+    if not query:
+        return {"query": "", "covers": []}
+    try:
+        return {"query": query, "covers": _mb_search_release_groups(query, limit=8)}
+    except EnrichTransportError:
+        return {"query": query, "covers": [], "error": "unavailable"}
 
 
 @app.get("/api/song/{filename:path}/art/candidates")
