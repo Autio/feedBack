@@ -498,21 +498,32 @@
     // to before (keeps the windowed grid's height math untouched). Honest state
     // transitions, NOT a fake per-song %: a match is binary (design §11).
     const _metaTile = {};   // fn -> 'queued' | 'working' | 'done' | 'nochange'
-    function enrichBadge(fn) {
-        const st = _metaTile[fn];
+    // Cards whose enrichment landed 'failed' (from the grid payload) — tracked so
+    // the PERSISTENT "no match" badge survives a batch tile clearing (a
+    // _patchCardEnrich with no flag falls back to this instead of wiping it).
+    // Populated as cards render (enrichBadge is called per card with the flag).
+    const _unmatched = new Set();
+    function enrichBadge(fn, unmatched) {
+        if (unmatched !== undefined) { if (unmatched) _unmatched.add(fn); else _unmatched.delete(fn); }
+        // A live batch tile wins over the resting no-match marker (they never
+        // coexist — the batch clears its tiles when it finishes).
+        const st = _metaTile[fn] || (_unmatched.has(fn) ? 'nomatch' : null);
         if (!st) return '';
         const M = {
-            queued:   ['bg-black/60 text-fb-textDim', '• Queued'],
-            working:  ['bg-fb-primary text-white', '⟳ Matching…'],
-            done:     ['bg-fb-good/90 text-black', '✓ Updated'],
-            nochange: ['bg-black/60 text-fb-textDim', '— No match'],
+            queued:   ['bg-black/60 text-fb-textDim', '• Queued', ''],
+            working:  ['bg-fb-primary text-white', '⟳ Matching…', ''],
+            done:     ['bg-fb-good/90 text-black', '✓ Updated', ''],
+            nochange: ['bg-black/60 text-fb-textDim', '— No match', ''],
+            // Resting indicator: subtle, so a mostly-unmatched library isn't a
+            // wall of loud badges; points at the manual fix.
+            nomatch:  ['bg-black/60 text-fb-textDim', 'No match', 'No metadata match found — right-click to fix it by hand'],
         };
         const conf = M[st] || M.queued;
         // top-10 clears the tuning chip (top-2) in both normal and select mode;
         // z-20 sits it above the art. Non-interactive so it never eats a click.
         return '<span class="v3-meta-tile absolute top-10 left-2 z-20 ' + conf[0] +
-            ' text-[0.5625rem] font-bold px-1.5 py-0.5 rounded-sm leading-tight pointer-events-none">' +
-            conf[1] + '</span>';
+            ' text-[0.5625rem] font-bold px-1.5 py-0.5 rounded-sm leading-tight pointer-events-none"' +
+            (conf[2] ? ' title="' + conf[2] + '"' : '') + '>' + conf[1] + '</span>';
     }
 
     // After a song is scored, the badge for that card is stale until the next
@@ -870,7 +881,7 @@
         return '<div class="group relative" data-fn="' + esc(key) + '" data-letter="' + esc(songBucket(song)) + '" data-library-song="' + esc(songId(song)) + '" data-library-provider="' + esc(state.provider) + '">' +
             '<div class="relative aspect-square rounded-lg overflow-hidden bg-fb-card cursor-pointer' + selRing + '" data-v3-play>' +
             '<img src="' + esc(artUrl(shown)) + '" alt="" loading="lazy" decoding="async" class="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" onerror="this.style.visibility=\'hidden\'">' +
-            tuning + checkbox + accuracyBadge(key) + fmtBadge(shown) + personalBadges(song) + enrichBadge(key) + overlay +
+            tuning + checkbox + accuracyBadge(key) + fmtBadge(shown) + personalBadges(song) + enrichBadge(key, song.unmatched) + overlay +
             '<div class="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition">' +
             inlineBtns +
             '<button data-fav data-fav-idle="text-white" title="Favorite" aria-label="Favorite" aria-pressed="' + (fav ? 'true' : 'false') + '" class="w-7 h-7 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center text-sm ' + (fav ? 'text-fb-accent' : 'text-white') + '">' + (fav ? '♥' : '♡') + '</button>' +
@@ -3489,6 +3500,7 @@
             '<button id="v3-songs-select" class="' + ctrl + (state.selectMode ? ' bg-fb-primary text-white' : '') + '">Select</button>' +
             '<button id="v3-songs-refresh" title="Refresh library (scan for new songs)" class="' + ctrl + '">⟳ Refresh</button>' +
             '<button id="v3-songs-refresh-meta" title="Refresh metadata for the songs shown (re-match titles, artwork &amp; more)" class="' + ctrl + '">🏷 Metadata</button>' +
+            '<button id="v3-songs-unmatched" title="Show only songs with no metadata match" class="' + ctrl + ((state.filters.match || []).includes('unmatched') ? ' bg-fb-primary text-white' : '') + '">Unmatched</button>' +
             '<button id="v3-songs-upload" class="' + ctrl + '">Upload</button>' +
             '</div></div></div>' +
             // Practice-aware library home: a repertoire progress meter + a
@@ -3559,6 +3571,7 @@
         // Refresh Metadata: local-only, so hide it for remote providers. The
         // button doubles as its own Stop while a pass runs (see onMetaBtnClick).
         byId('v3-songs-refresh-meta')?.addEventListener('click', onMetaBtnClick);
+        byId('v3-songs-unmatched')?.addEventListener('click', toggleUnmatchedFilter);
         _updateMetaBtnVisibility();
         // Reflect a scan already in progress (Settings button or a background
         // pass) on the Refresh button, so its state isn't just tied to clicks here.
@@ -3808,8 +3821,24 @@
     let _metaRunning = false;
 
     function _updateMetaBtnVisibility() {
+        const local = state.provider === 'local';   // enrichment + its filter are local-only
         const btn = document.getElementById('v3-songs-refresh-meta');
-        if (btn) btn.style.display = (state.provider === 'local') ? '' : 'none';
+        if (btn) btn.style.display = local ? '' : 'none';
+        const um = document.getElementById('v3-songs-unmatched');
+        if (um) um.style.display = local ? '' : 'none';
+    }
+
+    // Quick "Show unmatched" — the same filter as the drawer's Match → Unmatched,
+    // one click from the toolbar so the no-match pile is reachable right after a
+    // batch. Toggles the button + re-queries the grid.
+    function toggleUnmatchedFilter() {
+        const m = state.filters.match || (state.filters.match = []);
+        const i = m.indexOf('unmatched');
+        const on = i < 0;
+        if (on) m.push('unmatched'); else m.splice(i, 1);
+        const btn = document.getElementById('v3-songs-unmatched');
+        if (btn) { btn.classList.toggle('bg-fb-primary', on); btn.classList.toggle('text-white', on); }
+        reload();
     }
 
     // The local filenames the grid is currently SHOWING (data-fn is the local

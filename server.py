@@ -3038,6 +3038,22 @@ class MetadataDB:
                     out[fn] = st
         return out
 
+    def _unmatched_set(self, filenames) -> set:
+        """The subset of `filenames` whose enrichment landed in the 'failed'
+        (no-match) state — feeds the grid's persistent per-card "no match" badge,
+        so the misses stay visible at rest (the batch tile only shows while a
+        refresh runs). Chunked set membership, like favorite_set."""
+        fns = list(filenames)
+        out: set = set()
+        for i in range(0, len(fns), 400):
+            chunk = fns[i:i + 400]
+            if not chunk:
+                break
+            q = ("SELECT filename FROM song_enrichment WHERE match_state = 'failed' "
+                 "AND filename IN (%s)" % ",".join("?" * len(chunk)))
+            out.update(r[0] for r in self.conn.execute(q, chunk).fetchall())
+        return out
+
     def enrichment_song_row(self, filename: str) -> dict | None:
         """The identity fields the matcher/scorer keys on, for one song."""
         row = self.conn.execute(
@@ -4042,6 +4058,11 @@ class MetadataDB:
         fns = [s["filename"] for s in songs]
         udm = self.user_meta_map(fns)
         tgm = self.tags_map(fns)
+        # Enrichment "no match" (failed) set for the page, so a card can show a
+        # persistent "no match" badge — the Refresh-Metadata batch's transient
+        # per-tile state only paints while a pass runs. Cheap set membership like
+        # favs/estd, so the misses stay visible at rest.
+        um = self._unmatched_set(fns)
         # Canonical artist at display (P4): re-label the card's artist through the
         # alias override so "ACDC" reads as "AC/DC". Display-only — the row's sort
         # position (raw artist) is untouched, so a card can show a canonical name
@@ -4051,6 +4072,7 @@ class MetadataDB:
         for s in songs:
             s["user_difficulty"] = udm.get(s["filename"])
             s["tags"] = tgm.get(s["filename"], [])
+            s["unmatched"] = s["filename"] in um
             if amap:
                 s["artist"] = amap.get((s.get("artist") or "").lower(), s.get("artist"))
         # Grouped rows carry the ⚑ N (chart_count) + the work_key from the
