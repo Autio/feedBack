@@ -65,6 +65,14 @@
         scrollBound: false,
         songsById: {}, selectMode: false, selected: new Set(),
         railLetters: null, railLettersAreSongCounts: false, railJumping: false,
+        // ── Artist page (PR-B) ──
+        // Non-null while the artist sub-page is showing (the artist's canonical
+        // or raw name). The gates mirror the two Settings toggles: pages are
+        // local-only and default ON; the external-links row is opt-in.
+        artistPage: null,
+        artistReturnScroll: null,   // scrollTop to restore on ← Song Library
+        artistPagesEnabled: true,
+        artistLinksEnabled: false,
         // ── Windowed (virtualized) grid, stage 2 of #636 item 3 ──
         // state.songs is a SPARSE array indexed by absolute library position
         // (0..total-1); only the fetched pages are populated and only the visible
@@ -153,7 +161,7 @@
         if (!saved || typeof saved !== 'object') return;
         if (SORTS.some(([v]) => v === saved.sort)) state.sort = saved.sort;
         if (FORMATS.some(([v]) => v === saved.format)) state.format = saved.format;
-        if (saved.view === 'grid' || saved.view === 'tree' || saved.view === 'folder') state.view = saved.view;
+        if (saved.view === 'grid' || saved.view === 'tree' || saved.view === 'folder' || saved.view === 'albums') state.view = saved.view;
         if (typeof saved.grouping === 'boolean') state.grouping = saved.grouping;
         const f = saved.filters;
         if (f && typeof f === 'object') {
@@ -482,6 +490,49 @@
             '<svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/></svg>' + pct + '%</span>';
     }
 
+    // ── Metadata-refresh per-tile state (the "Refresh Metadata" batch) ─────────
+    // A transient badge painted ONLY while a metadata refresh is running: the
+    // songs actually being (re)matched animate queued → working → done. Keyed by
+    // the card's data-fn (= the local filename the enrichment cache keys on).
+    // Empty for every song outside a refresh, so an idle card is byte-identical
+    // to before (keeps the windowed grid's height math untouched). Honest state
+    // transitions, NOT a fake per-song %: a match is binary (design §11).
+    const _metaTile = {};   // fn -> 'queued' | 'working' | 'done' | 'nochange'
+    // Cards whose enrichment landed 'failed' (from the grid payload) — tracked so
+    // the PERSISTENT "no match" badge survives a batch tile clearing (a
+    // _patchCardEnrich with no flag falls back to this instead of wiping it).
+    // Populated as cards render (enrichBadge is called per card with the flag).
+    const _unmatched = new Set();
+    function enrichBadge(fn, unmatched) {
+        if (unmatched !== undefined) { if (unmatched) _unmatched.add(fn); else _unmatched.delete(fn); }
+        // A live batch tile wins over the resting no-match marker (they never
+        // coexist — the batch clears its tiles when it finishes).
+        const st = _metaTile[fn] || (_unmatched.has(fn) ? 'nomatch' : null);
+        if (!st) return '';
+        const M = {
+            queued:   ['bg-black/60 text-fb-textDim', '• Queued', ''],
+            working:  ['bg-fb-primary text-white', '⟳ Matching…', ''],
+            done:     ['bg-fb-good/90 text-black', '✓ Updated', ''],
+            nochange: ['bg-black/60 text-fb-textDim', '— No match', ''],
+            // Resting indicator: subtle, so a mostly-unmatched library isn't a
+            // wall of loud badges. Clickable — a one-click handoff into the
+            // Fix-metadata popup for this song (see the [data-meta-fix] wiring).
+            nomatch:  ['bg-black/60 text-fb-textDim', 'No match', 'Click to fix the metadata by hand'],
+        };
+        const conf = M[st] || M.queued;
+        const fixable = st === 'nomatch';   // resting badge → opens Fix-metadata
+        // top-10 clears the tuning chip (top-2) in both normal and select mode;
+        // z-20 sits it above the art. Batch states are non-interactive; the
+        // resting "no match" badge is the handoff into the popup.
+        const cls = 'v3-meta-tile absolute top-10 left-2 z-20 ' + conf[0] +
+            ' text-[0.5625rem] font-bold px-1.5 py-0.5 rounded-sm leading-tight ' +
+            (fixable ? 'pointer-events-auto cursor-pointer hover:bg-fb-primary hover:text-white transition-colors' : 'pointer-events-none');
+        return '<span class="' + cls + '"' +
+            (fixable ? ' data-meta-fix="1"' : '') +
+            (conf[2] ? ' title="' + conf[2] + '"' : '') +
+            '>' + conf[1] + '</span>';
+    }
+
     // After a song is scored, the badge for that card is stale until the next
     // full render(). Refresh state.accuracy from the server and patch the badge
     // of any currently-rendered card/row in place (grid + tree). `_dirtyScores`
@@ -591,16 +642,34 @@
         const shelf = Array.isArray(suggestions) ? suggestions : [];
 
         const { mastered, learning } = _repertoireCounts();
-        const pct = Math.max(0, Math.min(100, Math.round((mastered / total) * 100)));
-        const meter =
-            '<div class="v3-rep-meter">' +
-              '<div class="flex items-baseline justify-between gap-3 mb-1">' +
-                '<span class="text-sm font-semibold text-fb-text">Repertoire</span>' +
-                '<span class="text-xs text-fb-textDim">' + mastered + ' of ' + total + ' song' + (total === 1 ? '' : 's') +
-                  (learning ? ' &middot; ' + learning + ' in progress' : '') + '</span>' +
-              '</div>' +
-              '<div class="v3-rep-track"><div class="v3-rep-fill" style="width:' + pct + '%"></div></div>' +
-            '</div>';
+        // Day-one zero-state (launch polish): no practice data and no real
+        // growth-edge rows → an invitational meter, never "0 of N". Starter
+        // rows are the server's no-attempts fallback, so they count as "no
+        // practice yet" too.
+        const starterShelf = shelf.length > 0 && !!shelf[0].starter;
+        const invitational = (mastered + learning) === 0 && (!shelf.length || starterShelf);
+        let meter;
+        if (invitational) {
+            meter =
+                '<div class="v3-rep-meter">' +
+                  '<div class="flex items-baseline justify-between gap-3 mb-1">' +
+                    '<span class="text-sm font-semibold text-fb-text">Repertoire</span>' +
+                    '<span class="text-xs text-fb-textDim">grows as you master songs</span>' +
+                  '</div>' +
+                  '<div class="v3-rep-track"><div class="v3-rep-fill" style="width:0%"></div></div>' +
+                '</div>';
+        } else {
+            const pct = Math.max(0, Math.min(100, Math.round((mastered / total) * 100)));
+            meter =
+                '<div class="v3-rep-meter">' +
+                  '<div class="flex items-baseline justify-between gap-3 mb-1">' +
+                    '<span class="text-sm font-semibold text-fb-text">Repertoire</span>' +
+                    '<span class="text-xs text-fb-textDim">' + mastered + ' of ' + total + ' song' + (total === 1 ? '' : 's') +
+                      (learning ? ' &middot; ' + learning + ' in progress' : '') + '</span>' +
+                  '</div>' +
+                  '<div class="v3-rep-track"><div class="v3-rep-fill" style="width:' + pct + '%"></div></div>' +
+                '</div>';
+        }
 
         let shelfHtml = '';
         if (shelf.length) {
@@ -613,9 +682,14 @@
                 '<div class="mt-1 text-sm text-fb-text truncate">' + esc(r.title) + '</div>' +
                 '<div class="text-xs text-fb-textDim truncate">' + esc(r.artist) + '</div>' +
                 '</button>').join('');
+            // Starter rows → the invitational "Start here" framing; real
+            // growth-edge rows → the usual "Keep practicing". Same cards.
+            const header = starterShelf
+                ? '<h3 class="text-sm font-semibold text-fb-text">Start here</h3>' +
+                  '<div class="text-xs text-fb-textDim mb-2">a few approachable songs to kick things off</div>'
+                : '<h3 class="text-sm font-semibold text-fb-text mb-2">Keep practicing</h3>';
             shelfHtml =
-                '<section class="v3-kp-shelf mt-4">' +
-                '<h3 class="text-sm font-semibold text-fb-text mb-2">Keep practicing</h3>' +
+                '<section class="v3-kp-shelf mt-4">' + header +
                 '<div class="v3-kp-row">' + cards + '</div>' +
                 '</section>';
         }
@@ -814,7 +888,7 @@
         return '<div class="group relative" data-fn="' + esc(key) + '" data-letter="' + esc(songBucket(song)) + '" data-library-song="' + esc(songId(song)) + '" data-library-provider="' + esc(state.provider) + '">' +
             '<div class="relative aspect-square rounded-lg overflow-hidden bg-fb-card cursor-pointer' + selRing + '" data-v3-play>' +
             '<img src="' + esc(artUrl(shown)) + '" alt="" loading="lazy" decoding="async" class="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" onerror="this.style.visibility=\'hidden\'">' +
-            tuning + checkbox + accuracyBadge(key) + fmtBadge(shown) + personalBadges(song) + overlay +
+            tuning + checkbox + accuracyBadge(key) + fmtBadge(shown) + personalBadges(song) + enrichBadge(key, song.unmatched) + overlay +
             '<div class="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition">' +
             inlineBtns +
             '<button data-fav data-fav-idle="text-white" title="Favorite" aria-label="Favorite" aria-pressed="' + (fav ? 'true' : 'false') + '" class="w-7 h-7 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center text-sm ' + (fav ? 'text-fb-accent' : 'text-white') + '">' + (fav ? '♥' : '♡') + '</button>' +
@@ -822,7 +896,15 @@
             '<button data-menu title="More" aria-label="More actions" class="w-7 h-7 rounded-full bg-black/50 hover:bg-black/70 flex items-center justify-center text-white text-sm leading-none">⋮</button>' +
             '</div></div>' +
             '<div class="mt-1 text-sm text-fb-text truncate" title="' + esc(shown.title) + '">' + esc(shown.title) + '</div>' +
-            '<div class="text-xs text-fb-textDim truncate">' + esc(song.artist) + '</div>' +
+            // Artist line → the artist page (PR-B, entry point 2). The text
+            // block sits OUTSIDE the data-v3-play hitbox, so making it a
+            // button steals no play clicks. Same classes/line-height as the
+            // plain div (uniform card height is what makes the windowed
+            // grid's absolute-position math exact); non-local providers and
+            // the pages-off setting keep the original inert div.
+            ((state.provider === 'local' && song.artist && state.artistPagesEnabled !== false)
+                ? '<button data-v3-artist class="block w-full text-left text-xs text-fb-textDim truncate hover:text-fb-primary transition" title="Go to ' + esc(song.artist) + '">' + esc(song.artist) + '</button>'
+                : '<div class="text-xs text-fb-textDim truncate">' + esc(song.artist) + '</div>') +
             // Always emit the chip row (even when empty) at a FIXED single-line
             // height — uniform card height is what makes the windowed grid's
             // absolute-position math exact (.v3-card-chips in v3.css).
@@ -865,7 +947,21 @@
                 ? [{ id: '__unsplit', label: 'Rejoin other versions' }] : []),
             { id: '__playlist', label: 'Add to playlist' },
             { id: '__save', label: 'Save for later' },
+            // Artist page (PR-B, entry point 1) — local library only (the
+            // page reads the local DB) and gated on the Settings toggle.
+            ...(state.provider === 'local' && song.artist && state.artistPagesEnabled !== false
+                ? [{ id: '__artist', label: 'Go to artist' }] : []),
             ...items.map((a) => ({ id: a.id, label: a.label, destructive: a.destructive, enabled: a.enabled, plugin: a.pluginId })),
+            // Metadata + file actions (R2) — local library only (they all
+            // address the local DB / filesystem). Both openers (⋮ and
+            // right-click) share this list, so parity is structural.
+            ...(state.provider === 'local' && song.filename ? [
+                { id: '__fixmatch', label: 'Fix metadata…' },
+                { id: '__cover', label: 'Change cover…' },
+                { id: '__refreshmeta', label: 'Refresh metadata' },
+                { id: '__getinfo', label: 'Get info…' },
+                { id: '__remove', label: 'Remove from library', destructive: true },
+            ] : []),
         ];
         menu.innerHTML = rows.map((r) =>
             '<button data-act="' + esc(r.id) + '" class="w-full text-left px-3 py-1.5 hover:bg-fb-card/60 ' +
@@ -904,6 +1000,24 @@
             }
             if (id === '__playlist') { await addFilenamesToPlaylist([song.filename]); return; }
             if (id === '__save') { if (window.v3Saved) await window.v3Saved.toggle(song.filename); return; }
+            if (id === '__artist') { openArtistPage(song.artist); return; }
+            // Per-chart metadata actions follow the DISPLAYED chart (playTarget),
+            // like Play — under an intrinsic filter that's the matching member,
+            // not the group representative. (__remove stays on `song`: it needs
+            // the group's work_key/chart_count and pre-ticks the shown chart.)
+            if (id === '__fixmatch') { if (window.__fbFixMatch) window.__fbFixMatch(playTarget); return; }
+            if (id === '__cover') {
+                if (window.__fbOpenImagePicker) window.__fbOpenImagePicker({ filename: playTarget.filename, title: playTarget.title || playTarget.filename, artist: playTarget.artist, album: playTarget.album });
+                return;
+            }
+            if (id === '__refreshmeta') {
+                // Silent on success (hearing-safe, like the rest of the match
+                // layer) — the re-match trickles in through the normal pass.
+                await jsend('POST', '/api/enrichment/refresh/' + enc(playTarget.filename));
+                return;
+            }
+            if (id === '__getinfo') { openGetInfo(playTarget); return; }
+            if (id === '__remove') { await removeSongsFlow(song); return; }
             if (reg) await reg.run(id, song, { source: 'v3-songs' });
         }));
         // Tree rows ride the (ungrouped) artists endpoint, so they don't carry
@@ -955,6 +1069,169 @@
             _saveLibraryScrollSnapshot();
             if (window.playSong) window.playSong(enc(fn));
         }));
+    }
+
+    // ── Remove from library (R2) ───────────────────────────────────────────--
+    // On a single-chart song: confirm + delete, as the Details drawer does.
+    // On a multi-chart work: "remove the song" is ambiguous — a grouped card
+    // stands for several files — so an interstitial lists EVERY version for
+    // select/multi-select and deletes exactly what the user picked, one file
+    // or the whole set.
+    async function removeSongsFlow(song) {
+        let wk = song.work_key, count = song.chart_count;
+        if (count === undefined && song.filename) {
+            // Flat-mode grid / tree rows don't carry the group annotation.
+            const w = await jget('/api/chart/' + enc(song.filename) + '/work');
+            if (w) { wk = w.work_key; count = w.chart_count; }
+        }
+        if (wk && count >= 2) {
+            const data = await jget('/api/work/' + enc(wk) + '/charts');
+            const charts = (data && data.charts) || [];
+            if (charts.length >= 2) { openVersionRemoveModal(song, charts); return; }
+        }
+        if (!(await _confirmRemove(song.title || song.filename, 1))) return;
+        await _deleteFiles([song.filename]);
+    }
+
+    async function _confirmRemove(label, n) {
+        const what = n === 1 ? '"' + label + '"' : n + ' versions of "' + label + '"';
+        if (typeof window.uiConfirm === 'function') {
+            return window.uiConfirm({
+                title: 'Remove from library?',
+                html: 'Remove ' + esc(what) + ' from your library?' +
+                    '<p class="text-xs text-red-400/90 mt-2">This permanently deletes the file' + (n === 1 ? '' : 's') + ' from disk. This cannot be undone.</p>',
+                confirmText: 'Remove', cancelText: 'Cancel', danger: true,
+            });
+        }
+        return window.confirm('Remove ' + what + ' from your library? This deletes the file' + (n === 1 ? '' : 's') + ' from disk.');
+    }
+
+    async function _deleteFiles(files) {
+        for (const fn of files) {
+            try { await fetch('/api/song/' + enc(fn), { method: 'DELETE' }); } catch (_) { /* keep going */ }
+        }
+        try { _groupChanged(); } catch (_) { try { reload(); } catch (_) { /* */ } }
+    }
+
+    // The multi-version interstitial: a centred modal (the Tidy-up idiom)
+    // listing all charts of the work with checkboxes — the card's own chart
+    // pre-checked — so "delete" does exactly what the user means, whether
+    // that's one file or the batch.
+    function openVersionRemoveModal(song, charts) {
+        const sel = new Set([song.display_chart ? song.display_chart.filename : song.filename]);
+        const overlay = document.createElement('div');
+        overlay.className = 'fixed inset-0 z-[200] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4';
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); done(); } };
+        function done() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+        document.addEventListener('keydown', onKey);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) done(); });
+        document.body.appendChild(overlay);
+
+        function render() {
+            const rows = charts.map((c) => {
+                const tl = (typeof window.displayTuningName === 'function')
+                    ? window.displayTuningName(c.tuning_name || c.tuning) : (c.tuning_name || '');
+                const meta = [tl, (c.arrangements || []).map((a) => a.name).join('/'), c.format]
+                    .filter(Boolean).join(' · ');
+                return '<label class="flex items-start gap-2 px-2 py-1.5 rounded hover:bg-fb-card/50 cursor-pointer">' +
+                    '<input type="checkbox" data-rm="' + esc(c.filename) + '"' + (sel.has(c.filename) ? ' checked' : '') + ' class="w-4 h-4 mt-0.5 accent-fb-primary shrink-0">' +
+                    '<span class="min-w-0"><span class="block text-sm text-fb-text truncate">' + esc(c.title) +
+                    (c.is_representative ? ' <span class="text-fb-primary">●</span>' : '') + '</span>' +
+                    (meta ? '<span class="block text-xs text-fb-textDim truncate">' + esc(meta) + '</span>' : '') +
+                    '<span class="block text-xs text-fb-textDim/70 truncate fb-selectable">' + esc(c.filename) + '</span></span></label>';
+            }).join('');
+            const n = sel.size;
+            overlay.innerHTML =
+                '<div class="bg-fb-sidebar border border-fb-border/60 rounded-2xl w-full max-w-md shadow-2xl max-h-[85vh] flex flex-col">' +
+                '<div class="p-5 pb-3"><h3 class="text-base font-semibold text-fb-text">Remove versions of “' + esc(song.title || '') + '”</h3>' +
+                '<p class="text-xs text-fb-textDim mt-1">This song has ' + charts.length + ' charts. Tick the ones to remove — files are deleted from disk and this cannot be undone.</p></div>' +
+                '<div class="px-3 overflow-y-auto v3-scroll flex-1 min-h-[6rem]">' + rows + '</div>' +
+                '<div class="p-5 pt-3 flex items-center justify-between gap-3">' +
+                '<button data-rm-cancel class="text-sm px-4 py-2 bg-fb-card/60 hover:bg-fb-card border border-fb-border/50 rounded-xl text-fb-text">Cancel</button>' +
+                '<button data-rm-go ' + (n ? '' : 'disabled') + ' class="text-sm px-4 py-2 rounded-xl ' + (n ? 'bg-red-900/60 hover:bg-red-900/80 text-red-100' : 'bg-fb-card/50 text-fb-textDim cursor-not-allowed') + '">Remove selected (' + n + ')</button>' +
+                '</div></div>';
+            overlay.querySelectorAll('[data-rm]').forEach((cb) => cb.addEventListener('change', () => {
+                const fn = cb.getAttribute('data-rm');
+                if (cb.checked) sel.add(fn); else sel.delete(fn);
+                render();
+            }));
+            overlay.querySelector('[data-rm-cancel]')?.addEventListener('click', done);
+            overlay.querySelector('[data-rm-go]')?.addEventListener('click', async () => {
+                if (!sel.size) return;
+                done();
+                await _deleteFiles([...sel]);
+            });
+        }
+        render();
+    }
+
+    // ── Get info (R2) ──────────────────────────────────────────────────────--
+    // File location + pack contents + the match verdict, from
+    // GET /api/chart/{fn}/fileinfo. Paths and identity values are rendered
+    // with .fb-selectable so they stay copyable under the v3 no-select default.
+    function _fmtBytes(n) {
+        if (!Number.isFinite(n)) return '';
+        const u = ['B', 'KB', 'MB', 'GB'];
+        let i = 0;
+        while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+        return (i ? n.toFixed(1) : n) + ' ' + u[i];
+    }
+
+    async function openGetInfo(song) {
+        const info = await jget('/api/chart/' + enc(song.filename) + '/fileinfo');
+        if (!info) return;
+        const overlay = document.createElement('div');
+        overlay.className = 'fixed inset-0 z-[200] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4';
+        const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); done(); } };
+        function done() { overlay.remove(); document.removeEventListener('keydown', onKey); }
+        document.addEventListener('keydown', onKey);
+        overlay.addEventListener('click', (e) => { if (e.target === overlay) done(); });
+
+        const row = (label, value, selectable) => value
+            ? '<div class="flex gap-3 py-1"><span class="text-xs text-fb-textDim w-24 shrink-0 pt-0.5">' + label + '</span>' +
+            '<span class="text-sm text-fb-text min-w-0 break-all' + (selectable ? ' fb-selectable' : '') + '">' + esc(value) + '</span></div>'
+            : '';
+        const m = info.manifest || {};
+        const ident = m.identity || {};
+        const identLine = Object.keys(ident).map((k) =>
+            k + ': ' + (Array.isArray(ident[k]) ? ident[k].join(', ') : ident[k])).join(' · ');
+        const match = info.match || {};
+        const matchLine = match.match_state === 'manual' ? 'Pinned by you'
+            : match.match_state === 'matched' ? ('Matched (' + (match.match_source || 'auto') +
+                (match.match_score != null ? ', ' + Math.round(match.match_score * 100) + '%' : '') + ')')
+            : match.match_state === 'review' ? 'Waiting for review'
+            : match.match_state === 'failed' ? 'Not matched'
+            : 'Not scanned yet';
+        const contents = [
+            (m.arrangements || []).length ? (m.arrangements.length + ' arrangement' + (m.arrangements.length === 1 ? '' : 's') + ' (' + m.arrangements.join(', ') + ')') : '',
+            (m.stems || []).length ? ('stems: ' + m.stems.join(', ')) : '',
+            m.has_cover ? 'cover art' : 'no cover art',
+            m.has_lyrics ? 'lyrics' : '',
+        ].filter(Boolean).join(' · ');
+
+        overlay.innerHTML =
+            '<div class="bg-fb-sidebar border border-fb-border/60 rounded-2xl w-full max-w-lg shadow-2xl max-h-[85vh] flex flex-col">' +
+            '<div class="p-5 pb-3 flex items-center justify-between gap-3">' +
+            '<h3 class="text-base font-semibold text-fb-text truncate">' + esc(song.title || info.filename) + '</h3>' +
+            '<button data-gi-x aria-label="Close" class="text-fb-textDim hover:text-fb-text text-xl leading-none shrink-0">✕</button></div>' +
+            '<div class="px-5 pb-5 overflow-y-auto v3-scroll space-y-1">' +
+            row('Location', info.path, true) +
+            row('Folder', info.folder, true) +
+            row('Format', info.format === 'sloppak' ? 'Feedpak' : info.format) +
+            row('Size', _fmtBytes(info.size)) +
+            row('Modified', info.mtime ? new Date(info.mtime * 1000).toLocaleString() : '') +
+            (info.manifest ? (
+                '<div class="pt-2 mt-2 border-t border-fb-border/50"></div>' +
+                row('Contents', contents) +
+                row('Authors', (m.authors || []).filter(Boolean).join(', ')) +
+                row('Identity', identLine || 'no identity keys authored', !!identLine)
+            ) : '') +
+            '<div class="pt-2 mt-2 border-t border-fb-border/50"></div>' +
+            row('Match', matchLine) +
+            (match.canon_artist ? row('Canonical', [match.canon_artist, match.canon_title, match.canon_album, match.canon_year].filter(Boolean).join(' — '), true) : '') +
+            '</div></div>';
+        document.body.appendChild(overlay);
+        overlay.querySelector('[data-gi-x]')?.addEventListener('click', done);
     }
 
     // ── Charts drawer (P5d, design §7.1 UX-2/3) ────────────────────────────────
@@ -1197,6 +1474,19 @@
                 e.stopPropagation();
                 openChartsDrawer(e.currentTarget.getAttribute('data-charts'), song);
             });
+            // "No match" badge → straight into the Fix-metadata popup for this
+            // song (the batch → fix handoff). stopPropagation so it doesn't also
+            // trigger the card's play. Follows the displayed chart, like the menu.
+            el.querySelector('[data-meta-fix]')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (window.__fbFixMatch) window.__fbFixMatch(playTarget);
+            });
+            // Artist line → the artist page (PR-B). In select mode the grid's
+            // capture-phase toggle intercepts first, so selection still wins.
+            el.querySelector('[data-v3-artist]')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                openArtistPage(song.artist);
+            });
             el.querySelector('[data-fav]')?.addEventListener('click', async (e) => {
                 e.stopPropagation();
                 const btn = e.currentTarget;
@@ -1237,6 +1527,26 @@
         el.querySelector('[data-v3-play]')?.classList.toggle('ring-2', on);
         el.querySelector('[data-v3-play]')?.classList.toggle('ring-fb-primary', on);
         renderBatchBar();
+    }
+
+    // Bulletproof multi-select: in select mode a capture-phase click anywhere
+    // inside a [data-fn] row toggles the card and STOPS the event, so nothing (a
+    // per-card handler, a stray/legacy listener, an arrangement chip) can start
+    // playback. Attached ONCE to each persistent host (grid / tree / artist page)
+    // — their innerHTML is replaced on re-render but the host element survives,
+    // so a single bind never double-fires. Group headers / non-song chrome sit
+    // outside any [data-fn], so closest() is null and their native clicks pass
+    // through untouched.
+    function bindSelectGuard(hostEl) {
+        if (!hostEl) return;
+        hostEl.addEventListener('click', (e) => {
+            if (!state.selectMode) return;
+            const card = e.target.closest('[data-fn]');
+            if (!card || !hostEl.contains(card)) return;
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            toggleSelect(card.getAttribute('data-fn'), card);
+        }, true);
     }
 
     function setSelectMode(on) {
@@ -1574,13 +1884,57 @@
             '</div>';
     }
 
-    function _renderCardsRange(start, end) {
-        let html = '';
-        for (let i = start; i < end; i++) {
-            const s = state.songs[i];
-            html += s ? songCard(s) : _skeletonCard();
+    // Signature of the card at absolute index i: real-card vs skeleton, plus the
+    // select-mode it was built under. A change here is the ONLY reason a recycled
+    // node must be rebuilt (a hole filled after a fetch, or select mode toggled) —
+    // otherwise the node is reused as-is across window slides.
+    function _cardSig(i) {
+        return (state.songs[i] ? 'r' : 's') + (state.selectMode ? '1' : '0');
+    }
+
+    function _buildCardNode(i) {
+        const s = state.songs[i];
+        const tmp = document.createElement('div');
+        tmp.innerHTML = s ? songCard(s) : _skeletonCard();
+        const node = tmp.firstElementChild;
+        node.setAttribute('data-idx', String(i));
+        node.setAttribute('data-sig', _cardSig(i));
+        return node;
+    }
+
+    // Reconcile the grid's children to exactly cover [start, end) in ascending
+    // index order, REUSING the card nodes that stay in-window. Sliding the window
+    // one row now mutates only the row that entered/left instead of tearing down +
+    // rebuilding (+ re-wiring) the whole ~60-card window every frame — that
+    // per-slide teardown was the main-thread stall behind the "library skips every
+    // so many scrolls, up or down" report (the stall buffers held-arrow key-repeats
+    // that then flush in a burst). wireCards()'s data-wired guard wires only the
+    // freshly-built nodes.
+    function _syncWindow(grid, start, end) {
+        // Pass 1: drop nodes that left the window, are untagged, or whose content
+        // signature is stale (skeleton→real, or select-mode toggled). What remains
+        // is a reusable, correctly-rendered subset in ascending DOM order.
+        for (const el of Array.from(grid.children)) {
+            const a = el.getAttribute('data-idx');
+            const idx = a == null ? NaN : Number(a);
+            if (!(idx >= start && idx < end) || el.getAttribute('data-sig') !== _cardSig(idx)) {
+                el.remove();
+            }
         }
-        return html;
+        // Pass 2: walk [start, end) in order, reusing survivors and inserting new
+        // nodes into their correct slot; `ref` tracks the child expected next.
+        const existing = new Map();
+        for (const el of grid.children) existing.set(Number(el.getAttribute('data-idx')), el);
+        let ref = grid.firstChild;
+        for (let i = start; i < end; i++) {
+            let node = existing.get(i);
+            if (!node) node = _buildCardNode(i);
+            if (node === ref) {
+                ref = ref.nextSibling;
+            } else {
+                grid.insertBefore(node, ref);
+            }
+        }
     }
 
     // Fetch a single OFFSET page into the sparse store. Uses the stage-1 keyset
@@ -1631,6 +1985,20 @@
         }
     }
 
+    // Empty-library dead-end card (launch polish): only for a genuinely empty
+    // LOCAL library — a search / filter / format narrowing that merely matched
+    // nothing keeps the plain blank grid (saying "empty" there would lie), and
+    // remote providers own their own emptiness. The inline grid-column style
+    // spans the card across the grid without a new Tailwind class.
+    function _emptyLibraryHtml() {
+        if (state.q || state.format || activeFilterCount() !== 0 || state.provider !== 'local') return '';
+        return '<div class="flex flex-col items-center justify-center text-center py-8 gap-2" style="grid-column:1/-1">' +
+            '<div class="text-lg font-semibold text-fb-text">Your library is empty</div>' +
+            '<div class="text-sm text-fb-textDim max-w-md">Drop .sloppak files into your library folder, or use Upload above.</div>' +
+            '<button data-lib-empty-settings class="mt-3 bg-fb-primary hover:bg-fb-primaryHi text-white px-4 py-2 rounded-xl text-sm font-semibold">Open Settings</button>' +
+            '</div>';
+    }
+
     let _winRAF = 0;
     function requestWindowRender() {
         if (_winRAF) return;
@@ -1652,8 +2020,16 @@
         const rows = Math.ceil(total / Math.max(1, cols));
         sizer.style.height = (rows * rowH) + 'px';
         if (total === 0) {
-            grid.innerHTML = ''; grid.style.top = '0px';
+            grid.innerHTML = _emptyLibraryHtml(); grid.style.top = '0px';
             state.winRange = { start: 0, end: 0 };
+            if (grid.innerHTML) {
+                // The grid is absolutely positioned inside the sizer — give the
+                // sizer the card's height so it participates in layout.
+                sizer.style.height = grid.offsetHeight + 'px';
+                grid.querySelector('[data-lib-empty-settings]')?.addEventListener('click', () => {
+                    if (window.showScreen) window.showScreen('settings');
+                });
+            }
             return;
         }
         const sizerTop = _sizerTopInScroller(main, sizer);
@@ -1676,7 +2052,7 @@
         }
         if (_closeCardMenu) _closeCardMenu();   // its DOM is about to be replaced
         grid.style.top = (firstRow * rowH) + 'px';
-        grid.innerHTML = _renderCardsRange(start, end);
+        _syncWindow(grid, start, end);   // recycle in-window nodes; only the entering/leaving row rebuilds
         wireCards(grid);
         decorateTuningChips(grid);   // colour tuning chips by working-tuning match (async, feature-detected)
         state.winRange = { start, end };
@@ -2000,9 +2376,393 @@
     }
 
     // ── Tree ────────────────────────────────────────────────────────────────
+    // ── Albums (album-condensed browse; consumes /api/library/albums) ─────────
+    // Album cards -> click -> a track list (reusing /api/library?artist=&album=)
+    // with Play-album (feeds the play-queue). Respects the active drawer filters.
+    async function loadAlbums() {
+        const host = document.getElementById('v3-songs-albums');
+        if (!host) return;
+        host.innerHTML = '<p class="text-fb-textDim text-sm">Loading…</p>';
+        const data = await jget('/api/library/albums?' + queryParams().toString());
+        const albums = (data && data.albums) || [];
+        if (!albums.length) { host.innerHTML = '<p class="text-fb-textDim text-sm py-8 text-center">No albums match.</p>'; return; }
+        host.innerHTML =
+            '<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">' +
+            albums.map((a, i) =>
+                '<button data-album="' + i + '" class="group text-left">' +
+                '<div class="aspect-square rounded-lg overflow-hidden bg-fb-card mb-2">' +
+                (a.cover ? '<img src="' + esc(artUrl({ filename: a.cover })) + '" alt="" loading="lazy" decoding="async" class="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" onerror="this.style.visibility=\'hidden\'">' : '') +
+                '</div>' +
+                '<div class="text-sm text-fb-text truncate">' + esc(a.album) + '</div>' +
+                '<div class="text-xs text-fb-textDim truncate">' + esc(a.artist) + ' · ' + (a.count || 0) + ' track' + (a.count === 1 ? '' : 's') + '</div>' +
+                '</button>').join('') + '</div>';
+        host.querySelectorAll('[data-album]').forEach((b) => b.addEventListener('click', () => {
+            const a = albums[Number(b.getAttribute('data-album'))];
+            if (a) openAlbum(a);
+        }));
+    }
+    // `opts` (PR-B): the artist page reuses this album detail inside its own
+    // host with its own back label/target — { host, backLabel, onBack,
+    // ignoreFilters }. Call sites without opts are byte-for-byte the original
+    // albums-view flow.
+    async function openAlbum(a, opts) {
+        const host = (opts && opts.host) || document.getElementById('v3-songs-albums');
+        if (!host) return;
+        const backLabel = (opts && opts.backLabel) || '← Albums';
+        const onBack = (opts && opts.onBack) || (() => loadAlbums());
+        host.innerHTML = '<p class="text-fb-textDim text-sm">Loading…</p>';
+        // Normally honour the active drawer filters (like the album grid) but pin
+        // THIS album's artist/album and force track order — so the track list and
+        // Play-album never include songs the user filtered out. When opened FROM
+        // an artist page (ignoreFilters), drop the global filters entirely: the
+        // artist page is the artist's whole shelf, so its album view must show
+        // every track to match the page's counts — scoped only to artist+album.
+        const p = (opts && opts.ignoreFilters)
+            ? new URLSearchParams({ provider: state.provider, artist: a.artist, album: a.album, size: '300', sort: 'track' })
+            : queryParams({ artist: a.artist, album: a.album, size: '300', sort: 'track' }, { catalog: true });
+        const data = await jget('/api/library?' + p.toString());
+        const songs = (data && data.songs) || [];
+        host.innerHTML =
+            '<button data-albums-back class="text-sm text-fb-textDim hover:text-fb-text mb-4">' + esc(backLabel) + '</button>' +
+            '<div class="flex items-center justify-between gap-3 mb-4">' +
+            '<div class="min-w-0"><h2 class="text-2xl font-bold text-fb-text truncate">' + esc(a.album) + '</h2>' +
+            '<p class="text-sm text-fb-textDim truncate">' + esc(a.artist) + ' · ' + songs.length + ' track' + (songs.length === 1 ? '' : 's') + '</p></div>' +
+            (songs.length ? '<button data-album-playall class="bg-fb-primary hover:bg-fb-primaryHi text-white text-sm font-medium px-4 py-2 rounded-md shrink-0">▶ Play album</button>' : '') +
+            '</div>' +
+            '<ul class="space-y-1">' + songs.map((s, i) =>
+                '<li><button data-album-track="' + i + '" class="w-full flex items-center gap-3 px-3 py-2 rounded-md hover:bg-white/5 text-left">' +
+                '<span class="text-xs text-fb-textDim w-6 text-right">' + (i + 1) + '</span>' +
+                '<span class="flex-1 truncate text-sm text-fb-text">' + esc(s.title || s.filename) + '</span></button></li>').join('') + '</ul>';
+        host.querySelector('[data-albums-back]')?.addEventListener('click', () => onBack());
+        host.querySelector('[data-album-playall]')?.addEventListener('click', () => {
+            const files = songs.map((s) => s.filename).filter(Boolean);
+            if (!files.length) return;
+            if (window.feedBack && window.feedBack.playQueue) window.feedBack.playQueue.start(files, { source: a.album });
+            else if (typeof window.playSong === 'function') window.playSong(enc(files[0]));
+        });
+        host.querySelectorAll('[data-album-track]').forEach((b) => b.addEventListener('click', () => {
+            const s = songs[Number(b.getAttribute('data-album-track'))];
+            if (s && window.playSong) window.playSong(enc(s.filename));
+        }));
+    }
+
+    // One list-row of a song — shared by the tree view and the artist page's
+    // song list, so wireCards() gives both the same play/chips/fav/save/⋮
+    // behaviour from one markup source.
+    function treeSongRowHtml(s) {
+        const k = cardKey(s); const fl = fmtLabel(s); const chips = arrChipsHtml(s); const sel = state.selected.has(k);
+        // Display-only checkbox (pointer-events-none); the row's
+        // capture-phase select handler (render()) owns the toggle.
+        const checkbox = state.selectMode
+            ? '<input type="checkbox" data-select class="shrink-0 w-5 h-5 accent-fb-primary pointer-events-none"' + (sel ? ' checked' : '') + '>'
+            : '';
+        return (
+        '<div class="relative flex items-center gap-2 py-1 group" data-fn="' + esc(k) + '" data-library-song="' + esc(songId(s)) + '" data-library-provider="' + esc(state.provider) + '">' +
+        checkbox +
+        '<img src="' + esc(artUrl(s)) + '" alt="" loading="lazy" decoding="async" class="w-8 h-8 rounded object-cover bg-fb-card cursor-pointer' + (sel ? ' ring-2 ring-fb-primary' : '') + '" data-v3-play onerror="this.style.visibility=\'hidden\'">' +
+        '<span class="flex-1 min-w-0 cursor-pointer" data-v3-play><span class="block text-sm text-fb-text truncate">' + esc(s.title) + '</span></span>' +
+        (chips ? '<span class="hidden sm:flex items-center gap-1 shrink-0">' + chips + '</span>' : '') +
+        (fl ? '<span class="text-[0.5625rem] font-bold px-1 py-0.5 rounded shrink-0 ' + (fl === 'FEEDPAK' ? 'bg-fb-primary/20 text-fb-primary' : 'bg-fb-card text-fb-textDim') + '">' + fl + '</span>' : '') +
+        accuracyBadge(k, 'tree') +
+        // Same fav / save-for-later / overflow-menu cluster as the grid
+        // card. Always shown (like the arrangement chips), not hover-
+        // revealed. wireCards() binds all three for any [data-fn].
+        '<div class="flex items-center gap-0.5 shrink-0">' +
+        '<button data-fav data-fav-idle="text-fb-textDim" title="Favorite" aria-label="Favorite" aria-pressed="' + (s.favorite ? 'true' : 'false') + '" class="px-1 ' + (s.favorite ? 'text-fb-accent' : 'text-fb-textDim') + '">' + (s.favorite ? '♥' : '♡') + '</button>' +
+        '<button data-save title="Save for later" aria-label="Save for later" class="px-1 text-fb-textDim hover:text-fb-text">🔖</button>' +
+        '<button data-menu title="More" aria-label="More actions" class="px-1 text-fb-textDim hover:text-fb-text leading-none">⋮</button>' +
+        '</div>' +
+        '</div>');
+    }
+
+    // ── Artist page (PR-B, artist-pages launch charrette) ──────────────────────
+    // An in-place sub-render like openAlbum(): the artist "in your library" — a
+    // shelf plus your relationship to it, never a discography browser (locked
+    // position 1). Renders 100% from the local /page payload; the external
+    // links row is the one decorated extra, gated on the opt-in Settings toggle
+    // AND a MusicBrainz match, fetched lazily and cached server-side. Every
+    // count obeys the DENOMINATOR LAW (locked position 2): songs YOU OWN.
+
+    function _artistHostEl() { return document.getElementById('v3-songs-artistpage'); }
+
+    // Sync the two Settings gates into module state (fire-and-forget — the
+    // cached flags gate entry-point rendering; openArtistPage re-checks).
+    function refreshArtistPageGates() {
+        return jget('/api/settings').then((cfg) => {
+            if (!cfg) return;
+            state.artistPagesEnabled = cfg.artist_pages_enabled !== false;
+            state.artistLinksEnabled = cfg.artist_external_links === true;
+        });
+    }
+
+    // 2×2 mosaic of the artist's OWN album art — the playlist-cover grammar
+    // (#626 playlistCoverHtml) adapted to the page payload's art_urls. Never a
+    // broken-image tile: no art → a quiet glyph.
+    function artistMosaicHtml(arts) {
+        const box = 'w-32 h-32 sm:w-40 sm:h-40 shrink-0 rounded-xl overflow-hidden bg-fb-card';
+        const img = (u) => '<img src="' + esc(u) + '" alt="" loading="lazy" decoding="async" class="w-full h-full object-cover" onerror="this.style.visibility=\'hidden\'">';
+        if (!arts || !arts.length) return '<div class="' + box + ' flex items-center justify-center text-5xl text-fb-textDim">🎤</div>';
+        if (arts.length < 4) return '<div class="' + box + '">' + img(arts[0]) + '</div>';
+        return '<div class="' + box + ' grid grid-cols-2 grid-rows-2 gap-px">' + arts.slice(0, 4).map(img).join('') + '</div>';
+    }
+
+    function _linkDomain(u) {
+        try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return ''; }
+    }
+
+    // Toggle the browse hosts (grid/tree/albums/folder + home + rail) so the
+    // artist page can own the scroller, and back again on close.
+    function _setBrowseHostsHidden(hidden) {
+        if (hidden) {
+            ['v3-songs-gridsizer', 'v3-songs-tree', 'v3-songs-albums', 'lib-folder-tree',
+             'v3-lib-home', 'v3-songs-azrail', 'v3-songs-azbubble']
+                .forEach((id) => document.getElementById(id)?.classList.add('hidden'));
+            const fc = document.getElementById('lib-folder-controls');
+            if (fc) fc.style.display = 'none';
+        } else {
+            document.getElementById('v3-songs-gridsizer')?.classList.toggle('hidden', state.view !== 'grid');
+            document.getElementById('v3-songs-tree')?.classList.toggle('hidden', state.view !== 'tree');
+            document.getElementById('v3-songs-albums')?.classList.toggle('hidden', state.view !== 'albums');
+            document.getElementById('lib-folder-tree')?.classList.toggle('hidden', state.view !== 'folder');
+            const fc = document.getElementById('lib-folder-controls');
+            if (fc) fc.style.display = state.view === 'folder' ? 'flex' : 'none';
+            refreshRail();
+            updateLibraryHome();
+        }
+    }
+
+    // The one exported opener — every entry point (card ⋮ / right-click "Go to
+    // artist", the grid card's artist line, the Details drawer link, a
+    // similar-artist chip) funnels through here.
+    async function openArtistPage(artistName) {
+        const host = _artistHostEl();
+        if (!host || !artistName) return;
+        if (state.provider !== 'local' || state.artistPagesEnabled === false) return;
+        const main = _getV3MainScroller();
+        // Remember where browsing left off ONCE — chip-hopping between artist
+        // pages keeps the original return point.
+        if (!state.artistPage) state.artistReturnScroll = main ? main.scrollTop : 0;
+        state.artistPage = artistName;
+        _setBrowseHostsHidden(true);
+        host.classList.remove('hidden');
+        host.innerHTML = '<p class="text-fb-textDim text-sm">Loading…</p>';
+        _applyMainScrollTop(0);
+        const page = await jget('/api/artist/' + enc(artistName) + '/page');
+        if (state.artistPage !== artistName) return;             // superseded
+        if (!page) { closeArtistPage(); return; }
+        await renderArtistPage(page);
+    }
+
+    function closeArtistPage() {
+        const host = _artistHostEl();
+        if (host) { host.classList.add('hidden'); host.innerHTML = ''; }
+        if (!state.artistPage) return;
+        state.artistPage = null;
+        _setBrowseHostsHidden(false);
+        const top = state.artistReturnScroll;
+        state.artistReturnScroll = null;
+        _applyMainScrollTop(top || 0);
+        if (state.view === 'grid') requestWindowRender();
+    }
+
+    // reload() (any toolbar-driven change) leaves the sub-page without the
+    // scroll restore — the new state describes a fresh browse from the top.
+    function _dropArtistPageSilently() {
+        if (!state.artistPage) return;
+        state.artistPage = null;
+        state.artistReturnScroll = null;
+        const host = _artistHostEl();
+        if (host) { host.classList.add('hidden'); host.innerHTML = ''; }
+    }
+
+    async function renderArtistPage(page) {
+        const host = _artistHostEl();
+        if (!host) return;
+        const me = state.artistPage;
+        const name = page.artist || me || '';
+        // Songs list: page through /api/library with the artist filter (locked
+        // position 6 — query_page, keyset-safe; never the DISTINCT+OFFSET
+        // query_artists path). Unfiltered on purpose: the page is the artist's
+        // whole shelf, not the grid's current filter view.
+        const songs = [];
+        let p = 0, total = Infinity;
+        while (songs.length < total) {
+            const q = new URLSearchParams({
+                provider: 'local', artist: name, sort: 'artist',
+                size: '100', page: String(p),
+            });
+            const data = await jget('/api/library?' + q.toString());
+            if (!data || !Array.isArray(data.songs)) break;
+            songs.push(...data.songs);
+            total = (data.total != null) ? data.total : songs.length;
+            if (!data.songs.length || p > 50) break;   // safety: no progress / runaway
+            p++;
+        }
+        if (state.artistPage !== me || !host.isConnected) return;  // superseded mid-fetch
+        songs.forEach((s) => { state.songsById[cardKey(s)] = s; });
+
+        const aliasLine = (page.variants || []).length
+            ? '<div class="text-xs text-fb-textDim mt-1">also shown as: ' +
+              page.variants.map((v) => esc(v.name) + ' ×' + v.count).join(' · ') + '</div>'
+            : '';
+        // Provenance pill — only when the artist is actually matched (drawer/
+        // Get-info grammar: say where the tidy names come from, ≤2 taps away).
+        const pill = page.mb_artist_id
+            ? '<div class="mt-2"><span class="inline-flex items-center text-[0.625rem] px-2 py-0.5 rounded-full bg-fb-primary/15 text-fb-primary border border-fb-primary/40" title="This artist is matched to MusicBrainz — the match lives in your local cache; your files are never modified">Matched · MusicBrainz</span></div>'
+            : '';
+        // Stats strip. DENOMINATOR LAW: every number is songs in YOUR library;
+        // the mastered segment is omitted entirely until one exists —
+        // invitational, never "0 mastered" (launch blind-spot #3).
+        const bits = [
+            page.song_count + ' song' + (page.song_count === 1 ? '' : 's'),
+            page.album_count + ' album' + (page.album_count === 1 ? '' : 's'),
+        ];
+        if (page.mastered_count > 0) bits.push(page.mastered_count + ' mastered');
+
+        const albumsHtml = (page.albums || []).length
+            ? '<section class="mt-6"><h3 class="text-sm font-semibold text-fb-text mb-2">Albums</h3>' +
+              '<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4">' +
+              page.albums.map((al, i) =>
+                  '<button data-ap-album="' + i + '" class="group text-left">' +
+                  '<div class="aspect-square rounded-lg overflow-hidden bg-fb-card mb-2">' +
+                  (al.cover ? '<img src="' + esc(artUrl({ filename: al.cover })) + '" alt="" loading="lazy" decoding="async" class="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105" onerror="this.style.visibility=\'hidden\'">' : '') +
+                  '</div>' +
+                  '<div class="text-sm text-fb-text truncate">' + esc(al.name) + '</div>' +
+                  '<div class="text-xs text-fb-textDim truncate">' + (al.year ? esc(al.year) + ' · ' : '') + (al.count || 0) + ' track' + (al.count === 1 ? '' : 's') + '</div>' +
+                  '</button>').join('') +
+              '</div></section>'
+            : '';
+
+        const songsHtml = songs.length
+            ? '<section class="mt-6"><h3 class="text-sm font-semibold text-fb-text mb-2">Songs</h3>' +
+              '<div class="space-y-0.5">' + songs.map(treeSongRowHtml).join('') + '</div></section>'
+            : '<p class="text-sm text-fb-textDim mt-6">No songs by this artist are in your library.</p>';
+
+        // Similar in your library (locked position 3): genre co-occurrence over
+        // artists you already OWN — never an acquisition funnel. Empty → the
+        // whole module hides (never "Similar: none").
+        const similarHtml = (page.similar || []).length
+            ? '<section class="mt-6"><h3 class="text-sm font-semibold text-fb-text mb-2">Similar in your library</h3>' +
+              '<div class="flex flex-wrap gap-2">' +
+              page.similar.map((s) =>
+                  '<button data-ap-similar="' + esc(s.artist) + '" class="text-xs px-3 py-1.5 rounded-full bg-fb-card/60 border border-fb-border/50 text-fb-text hover:border-fb-primary/60 hover:text-fb-primary transition">' + esc(s.artist) + '</button>').join('') +
+              '</div></section>'
+            : '';
+
+        host.innerHTML =
+            '<button data-ap-back class="text-sm text-fb-textDim hover:text-fb-text mb-4">← Song Library</button>' +
+            '<div class="flex items-start gap-4">' +
+            artistMosaicHtml(page.art_urls) +
+            '<div class="min-w-0 flex-1">' +
+            '<h2 class="text-2xl font-bold text-fb-text truncate" title="' + esc(name) + '">' + esc(name) + '</h2>' +
+            aliasLine + pill +
+            '<p class="text-sm text-fb-textDim mt-2">' + bits.join(' · ') + '</p>' +
+            '<div class="flex flex-wrap gap-2 mt-3">' +
+            (songs.length
+                ? '<button data-ap-playall class="bg-fb-primary hover:bg-fb-primaryHi text-white text-sm font-medium px-4 py-2 rounded-md">▶ Play all</button>' +
+                  '<button data-ap-shuffle class="bg-fb-card/60 hover:bg-fb-card border border-fb-border/50 text-fb-text text-sm px-4 py-2 rounded-md">⇄ Shuffle</button>'
+                : '') +
+            '<button data-ap-smart class="bg-fb-card/60 hover:bg-fb-card border border-fb-border/50 text-fb-text text-sm px-4 py-2 rounded-md" title="A live playlist of everything by this artist — new songs join it automatically">Save as smart playlist</button>' +
+            '</div>' +
+            '</div></div>' +
+            albumsHtml +
+            songsHtml +
+            similarHtml +
+            // External links land here (lazy fetch) — hidden until they exist.
+            '<div data-ap-links></div>';
+
+        host.querySelector('[data-ap-back]')?.addEventListener('click', closeArtistPage);
+        // Play all / Shuffle → the shared playQueue (same path as Play-album).
+        const startQueue = (shuffle) => {
+            let files = songs.map((s) => s.filename).filter(Boolean);
+            if (!files.length) return;
+            if (shuffle) {
+                files = files.slice();
+                for (let i = files.length - 1; i > 0; i--) {
+                    const j = Math.floor(Math.random() * (i + 1));
+                    const t = files[i]; files[i] = files[j]; files[j] = t;
+                }
+            }
+            _saveLibraryScrollSnapshot();
+            if (window.feedBack && window.feedBack.playQueue) window.feedBack.playQueue.start(files, { source: name });
+            else if (typeof window.playSong === 'function') window.playSong(enc(files[0]));
+        };
+        host.querySelector('[data-ap-playall]')?.addEventListener('click', () => startQueue(false));
+        host.querySelector('[data-ap-shuffle]')?.addEventListener('click', () => startQueue(true));
+        // Save as smart playlist (locked position 12): a rules-based
+        // collection over the existing machinery — a LIVING query that
+        // regenerates, never a completable checklist.
+        host.querySelector('[data-ap-smart]')?.addEventListener('click', async (e) => {
+            const btn = e.currentTarget;
+            const res = await jsend('POST', '/api/collections', { name: name, rules: { artist: name } });
+            if (res && res.ok) {
+                btn.textContent = '✓ Saved';
+                btn.disabled = true;
+                if (window.fbNotify) {
+                    try { window.fbNotify.show({ title: 'Smart playlist saved', message: '“' + name + '” is now a source in the library picker', icon: '🎵' }); } catch (_) { /* */ }
+                }
+            }
+        });
+        // Album cells reuse the album detail in place; back returns HERE.
+        host.querySelectorAll('[data-ap-album]').forEach((b) => b.addEventListener('click', () => {
+            const al = (page.albums || [])[Number(b.getAttribute('data-ap-album'))];
+            if (!al) return;
+            openAlbum({ artist: name, album: al.name },
+                { host: host, backLabel: '← ' + name, onBack: () => openArtistPage(name), ignoreFilters: true });
+        }));
+        // Similar chips → that artist's page (the return point stays the
+        // original browse position — see openArtistPage).
+        host.querySelectorAll('[data-ap-similar]').forEach((b) => b.addEventListener('click', () => {
+            openArtistPage(b.getAttribute('data-ap-similar'));
+        }));
+        wireCards(host);
+        decorateTuningChips(host);   // feature-detected; no-op without the capability
+        _fillArtistLinks(host, name, page);
+    }
+
+    // External links row (locked position 4): whitelisted MB url-rels, opt-in
+    // via Settings, always the external browser, domain visible. Renders ONLY
+    // when the toggle is on AND the fetch yields links — otherwise the section
+    // simply never appears (empty modules hide).
+    async function _fillArtistLinks(host, name, page) {
+        if (!state.artistLinksEnabled || !page.mb_artist_id) return;
+        const slot = host.querySelector('[data-ap-links]');
+        if (!slot) return;
+        const data = await jget('/api/artist/' + enc(name) + '/links');
+        // slot.isConnected covers every superseded case — navigating away, a
+        // reload, or hopping to another artist all replace this DOM.
+        if (!data || !slot.isConnected) return;
+        const links = data.links || {};
+        const items = [];
+        const push = (label, url) => { if (url) items.push({ label: label, url: url }); };
+        push('Official site', links.official);
+        push('Tour dates', links.tour);
+        push('Videos', links.video);
+        (Array.isArray(links.social) ? links.social : []).forEach((u) => push('Social', u));
+        push('Wikipedia', links.wikipedia);
+        if (!items.length) return;
+        slot.innerHTML =
+            '<div class="mt-6 pt-4 border-t border-fb-border/40">' +
+            '<div class="text-xs text-fb-textDim mb-2">On the web · opens your browser</div>' +
+            '<div class="flex flex-wrap gap-2">' +
+            items.map((it) =>
+                '<a href="' + esc(it.url) + '" target="_blank" rel="noopener noreferrer" class="text-xs px-3 py-1.5 rounded-full bg-fb-card/60 border border-fb-border/50 text-fb-text hover:border-fb-primary/60 transition">' +
+                esc(it.label) + ' ↗ <span class="text-fb-textDim">' + esc(_linkDomain(it.url)) + '</span></a>').join('') +
+            '</div></div>';
+    }
+
+    // Global opener — the drawer link, plugins, and other views reach the page
+    // without touching this module's internals.
+    window.__fbOpenArtistPage = openArtistPage;
+
     async function loadTree() {
         const host = document.getElementById('v3-songs-tree');
         if (!host) return;
+        // The list view always groups artist -> album (query_artists has no
+        // free sort) — when the picked sort is something else, say so instead
+        // of silently ignoring it ("why does the sort do nothing here?").
+        const _treeSortNote = railSortColumn() === 'artist' ? ''
+            : '<p class="text-xs text-fb-textDim mb-3">List view groups by artist — the selected sort applies to the card grid.</p>';
         // Capture expanded groups BEFORE the "Loading…" wipe below, so a reload
         // (e.g. toggling select mode) restores them instead of collapsing all.
         const openArtists = new Set(
@@ -2022,35 +2782,12 @@
         }
         if (!artists.length) { host.innerHTML = '<p class="text-fb-textDim text-sm">Nothing here.</p>'; return; }
         artists.forEach((a) => (a.albums || []).forEach((al) => (al.songs || []).forEach((s) => { state.songsById[cardKey(s)] = s; })));
-        host.innerHTML = artists.map((a) =>
+        host.innerHTML = _treeSortNote + artists.map((a) =>
             '<details data-artist="' + esc(a.name) + '"' + (openArtists.has(a.name) ? ' open' : '') + ' class="border-b border-fb-border/40"><summary class="cursor-pointer py-2 text-fb-text flex items-center justify-between">' +
             '<span>' + esc(a.name) + '</span><span class="text-xs text-fb-textDim">' + esc(a.song_count) + '</span></summary>' +
             '<div class="pl-3 pb-2 space-y-2">' + (a.albums || []).map((al) =>
                 '<div><div class="text-xs uppercase tracking-wider text-fb-textDim/70 mt-2 mb-1">' + esc(al.name || 'Unknown') + '</div>' +
-                (al.songs || []).map((s) => {
-                    const k = cardKey(s); const fl = fmtLabel(s); const chips = arrChipsHtml(s); const sel = state.selected.has(k);
-                    // Display-only checkbox (pointer-events-none); the row's
-                    // capture-phase select handler (render()) owns the toggle.
-                    const checkbox = state.selectMode
-                        ? '<input type="checkbox" data-select class="shrink-0 w-5 h-5 accent-fb-primary pointer-events-none"' + (sel ? ' checked' : '') + '>'
-                        : '';
-                    return (
-                    '<div class="relative flex items-center gap-2 py-1 group" data-fn="' + esc(k) + '" data-library-song="' + esc(songId(s)) + '" data-library-provider="' + esc(state.provider) + '">' +
-                    checkbox +
-                    '<img src="' + esc(artUrl(s)) + '" alt="" loading="lazy" decoding="async" class="w-8 h-8 rounded object-cover bg-fb-card cursor-pointer' + (sel ? ' ring-2 ring-fb-primary' : '') + '" data-v3-play onerror="this.style.visibility=\'hidden\'">' +
-                    '<span class="flex-1 min-w-0 cursor-pointer" data-v3-play><span class="block text-sm text-fb-text truncate">' + esc(s.title) + '</span></span>' +
-                    (chips ? '<span class="hidden sm:flex items-center gap-1 shrink-0">' + chips + '</span>' : '') +
-                    (fl ? '<span class="text-[0.5625rem] font-bold px-1 py-0.5 rounded shrink-0 ' + (fl === 'FEEDPAK' ? 'bg-fb-primary/20 text-fb-primary' : 'bg-fb-card text-fb-textDim') + '">' + fl + '</span>' : '') +
-                    accuracyBadge(k, 'tree') +
-                    // Same fav / save-for-later / overflow-menu cluster as the grid
-                    // card. Always shown (like the arrangement chips), not hover-
-                    // revealed. wireCards() binds all three for any [data-fn].
-                    '<div class="flex items-center gap-0.5 shrink-0">' +
-                    '<button data-fav data-fav-idle="text-fb-textDim" title="Favorite" aria-label="Favorite" aria-pressed="' + (s.favorite ? 'true' : 'false') + '" class="px-1 ' + (s.favorite ? 'text-fb-accent' : 'text-fb-textDim') + '">' + (s.favorite ? '♥' : '♡') + '</button>' +
-                    '<button data-save title="Save for later" aria-label="Save for later" class="px-1 text-fb-textDim hover:text-fb-text">🔖</button>' +
-                    '<button data-menu title="More" aria-label="More actions" class="px-1 text-fb-textDim hover:text-fb-text leading-none">⋮</button>' +
-                    '</div>' +
-                    '</div>'); }).join('') + '</div>').join('') + '</div></details>').join('');
+                (al.songs || []).map(treeSongRowHtml).join('') + '</div>').join('') + '</div></details>').join('');
         wireCards(host);
     }
 
@@ -2205,6 +2942,11 @@
         try { const r = await fetch('/api/song/' + enc(fn) + '/user-meta'); if (r.ok) meta = await r.json(); } catch (_) { /* offline → row data */ }
         let vocab = [];
         try { const r = await fetch('/api/tags'); if (r.ok) vocab = (await r.json()).tags || []; } catch (_) { /* */ }
+        // Match provenance (launch polish): the drawer names what this chart
+        // matched, so a silently-wrong first match is visible where the
+        // metadata lives. 404 (no row yet) / offline → no line.
+        let enrich = null;
+        try { const r = await fetch('/api/enrichment/song/' + enc(fn)); if (r.ok) enrich = await r.json(); } catch (_) { /* offline → no provenance line */ }
         if (_detailsEls) closeDetails();   // a concurrent open resolved first
 
         const st = {
@@ -2212,6 +2954,8 @@
             diff: (meta.user_difficulty != null ? meta.user_difficulty : null),
             notes: meta.notes || '', tags: (meta.tags || []).slice(),
             fav: !!song.favorite, artDataUrl: null,
+            gap: null, gapSel: null,   // gap-fill (R4a): preview state + selected keys
+            enrich: enrich,            // match provenance for the Identity section
         };
 
         const overlay = document.createElement('div');
@@ -2236,6 +2980,57 @@
         if (window._trapFocusInModal) { try { window._trapFocusInModal(drawer); } catch (_) { /* */ } }
         const first = drawer.querySelector('#det-title');
         if (first) { try { first.focus({ preventScroll: true }); const n = first.value.length; first.setSelectionRange(n, n); } catch (_) { /* */ } }
+    }
+
+    // Gap-fill (R4a) block inside the drawer's Identity section: preview →
+    // per-key confirm → written. Adds ABSENT keys only; the server re-checks
+    // under its io lock, so this UI can never replace an author-set value.
+    const GAP_KEY_LABELS = { album: 'Album', year: 'Year', genres: 'Genres', mbid: 'MusicBrainz ID', isrc: 'ISRC' };
+    function gapFillHtml(st) {
+        const g = st.gap;
+        if (!g) return '<button data-gapfill-check class="text-xs text-fb-textDim hover:text-fb-text">Write missing info to file…</button>';
+        if (g.loading) return '<div class="text-xs text-fb-textDim">Checking the file…</div>';
+        if (g.written) {
+            const names = Object.keys(g.written).map((k) => GAP_KEY_LABELS[k] || k).join(', ');
+            return '<div class="text-xs text-fb-text">✓ Added to file: ' + esc(names) + '</div>';
+        }
+        if (!g.eligible) {
+            const why = {
+                'not-sloppak': 'Only feedpak songs can be written to.',
+                'no-match': 'No confirmed match yet — nothing verified to write.',
+                'review': 'This song’s match is waiting for review — confirm it first.',
+                'nothing-missing': 'Nothing missing — the file already has all of this.',
+            }[g.reason] || 'Could not check the file. Try again.';
+            return '<div class="text-xs text-fb-textDim">' + esc(why) + '</div>';
+        }
+        const rows = (g.missing || []).map((m) => {
+            const val = Array.isArray(m.value) ? m.value.join(', ') : String(m.value);
+            return '<label class="flex items-center gap-2 text-sm text-fb-text">' +
+                '<input type="checkbox" data-gapfill-key="' + esc(m.key) + '"' + (st.gapSel && st.gapSel.has(m.key) ? ' checked' : '') + '>' +
+                '<span class="text-fb-textDim shrink-0">' + esc(GAP_KEY_LABELS[m.key] || m.key) + '</span>' +
+                '<span class="truncate" title="' + esc(val) + '">' + esc(val) + '</span></label>';
+        }).join('');
+        return '<div class="space-y-2">' +
+            '<div class="text-xs font-semibold uppercase tracking-wider text-fb-textDim">Write to file</div>' + rows +
+            '<div class="text-[0.6875rem] text-fb-textDim">Only adds what’s missing — nothing already in the file is changed. A backup (.bak) is kept beside the file.</div>' +
+            '<div class="flex gap-2"><button data-gapfill-write class="bg-fb-primary hover:bg-fb-primaryHi text-white px-3 py-1.5 rounded-lg text-xs font-semibold">Write to file</button>' +
+            '<button data-gapfill-cancel class="px-3 py-1.5 bg-fb-card/60 hover:bg-fb-card border border-fb-border/50 rounded-lg text-xs text-fb-text">Cancel</button></div></div>';
+    }
+
+    // Match-provenance line under the Identity fields (launch polish): names
+    // the canonical identity this chart matched — the invisible-first-wrong-
+    // match fix — with the same Fix-match escape hatch the card menu offers.
+    // Only for settled matches; pending/review/failed rows stay silent here
+    // (the review chip / match facet own those states).
+    function provenanceHtml(st) {
+        const e = st.enrich;
+        if (!e || (e.match_state !== 'matched' && e.match_state !== 'manual')) return '';
+        const who = [e.canon_artist, e.canon_title].filter(Boolean).join(' — ');
+        if (!who) return '';
+        const src = e.match_state === 'manual' ? 'your pick' : 'MusicBrainz';
+        return '<div class="flex items-baseline gap-2 text-xs text-fb-textDim">' +
+            '<span class="truncate">Matched: ' + esc(who) + ' (' + esc(src) + ')</span>' +
+            '<button data-det-fixmatch class="shrink-0 text-fb-primary hover:text-fb-primaryHi">Fix match</button></div>';
     }
 
     function detailsHtml(song, st, vocab) {
@@ -2269,8 +3064,16 @@
             // Identity — writes back into the feedpak FILE
             '<div class="space-y-3"><div class="flex items-center gap-2"><div class="text-xs font-semibold uppercase tracking-wider text-fb-textDim">Identity</div>' +
             '<span class="text-[0.625rem] px-1.5 py-0.5 rounded-full bg-gray-800/70 text-fb-textDim border border-gray-700" title="These came from the song&#39;s feedpak. Editing them writes back to the file.">From pack</span></div>' +
-            field('det-title', 'Title', st.t) + field('det-artist', 'Artist', st.a) + field('det-album', 'Album', st.al) +
-            '<div><label for="det-year" class="text-xs text-fb-textDim mb-1 block">Year</label><input type="text" inputmode="numeric" id="det-year" value="' + esc(st.y) + '" placeholder="e.g. 2024" class="w-full bg-fb-card border border-fb-border/60 rounded-lg px-3 py-2 text-sm text-fb-text outline-none focus:border-fb-primary/60"></div></div>' +
+            field('det-title', 'Title', st.t) + field('det-artist', 'Artist', st.a) +
+            // Artist page (PR-B, entry point 3) — a small jump-off next to the
+            // Artist field; local library + pages-toggle gated like the others.
+            ((state.provider === 'local' && (st.a || song.artist) && state.artistPagesEnabled !== false)
+                ? '<button data-det-artist-page class="text-xs text-fb-primary hover:text-fb-primaryHi text-left">View artist page →</button>'
+                : '') +
+            field('det-album', 'Album', st.al) +
+            '<div><label for="det-year" class="text-xs text-fb-textDim mb-1 block">Year</label><input type="text" inputmode="numeric" id="det-year" value="' + esc(st.y) + '" placeholder="e.g. 2024" class="w-full bg-fb-card border border-fb-border/60 rounded-lg px-3 py-2 text-sm text-fb-text outline-none focus:border-fb-primary/60"></div>' +
+            provenanceHtml(st) +
+            '<div data-det-gapfill>' + gapFillHtml(st) + '</div></div>' +
 
             // Personal practice layer — local, never shared
             '<div class="space-y-3 pt-1"><div class="text-xs font-semibold uppercase tracking-wider text-fb-textDim">Your practice <span class="normal-case font-normal text-fb-textDim/70">· stays on this device</span></div>' +
@@ -2316,7 +3119,18 @@
 
         const artWrap = $('[data-det-art]'); const artFile = $('#det-art-file');
         if (artWrap && artFile) {
-            artWrap.addEventListener('click', () => artFile.click());
+            // Art click opens the cover PICKER (PR-C) — the old direct file
+            // dialog lives on inside it as the Upload tile. The picker applies
+            // immediately (its own routes + refresh), so it bypasses the
+            // drawer's Save; the file-input path below stays as the fallback
+            // when image-picker.js isn't loaded.
+            artWrap.addEventListener('click', () => {
+                if (window.__fbOpenImagePicker) {
+                    window.__fbOpenImagePicker({ filename: song.filename, title: song.title || song.filename, artist: song.artist, album: song.album });
+                } else {
+                    artFile.click();
+                }
+            });
             artFile.addEventListener('change', () => {
                 const f = artFile.files && artFile.files[0]; if (!f) return;
                 const rd = new FileReader();
@@ -2337,6 +3151,60 @@
 
         $('[data-det-save]')?.addEventListener('click', () => saveDetails(song, st));
         $('[data-det-remove]')?.addEventListener('click', () => removeFromLibrary(song));
+        // Fix match → the exact flow the card ⋮ menu uses (match-review.js).
+        // The drawer closes first: the match modal sits below the drawer's
+        // z-index, and the fix supersedes the edit anyway.
+        $('[data-det-fixmatch]')?.addEventListener('click', () => {
+            closeDetails();
+            if (window.__fbFixMatch) window.__fbFixMatch(song);
+        });
+        // "View artist page →" — uses the field's CURRENT text (an in-progress
+        // rename still lands on the right page once saved; unsaved text simply
+        // canonicalizes server-side), falling back to the row's artist.
+        $('[data-det-artist-page]')?.addEventListener('click', () => {
+            const a = (st.a || '').trim() || song.artist || '';
+            if (!a) return;
+            closeDetails();
+            openArtistPage(a);
+        });
+
+        // Gap-fill (R4a): user-initiated write of CONFIRMED missing info into
+        // the pack file. The server recomputes proposals under its io lock, so
+        // a key that gained an author value since the preview is skipped.
+        $('[data-gapfill-check]')?.addEventListener('click', async () => {
+            st.gap = { loading: true }; render();
+            let d = null;
+            try { const r = await fetch('/api/song/' + enc(song.filename) + '/gap-fill'); if (r.ok) d = await r.json(); } catch (_) { /* offline */ }
+            st.gap = d || { eligible: false, reason: 'error' };
+            st.gapSel = new Set(((d && d.missing) || []).map((m) => m.key));
+            render();
+        });
+        drawer.querySelectorAll('[data-gapfill-key]').forEach((cb) => cb.addEventListener('change', () => {
+            const k = cb.getAttribute('data-gapfill-key');
+            if (!st.gapSel) st.gapSel = new Set();
+            if (cb.checked) st.gapSel.add(k); else st.gapSel.delete(k);
+        }));
+        $('[data-gapfill-cancel]')?.addEventListener('click', () => { st.gap = null; render(); });
+        $('[data-gapfill-write]')?.addEventListener('click', async () => {
+            const keys = st.gapSel ? Array.from(st.gapSel) : [];
+            if (!keys.length) return;
+            let d = null, ok = false;
+            try {
+                const r = await fetch('/api/song/' + enc(song.filename) + '/gap-fill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys }) });
+                ok = r.ok; d = await r.json();
+            } catch (_) { /* offline */ }
+            if (!ok || !d || !d.written) {
+                if (window.fbNotify) { try { window.fbNotify.show({ title: 'Write failed', message: 'Could not write to the file. Please try again.', icon: '⚠️', accent: '#EF4444' }); } catch (e) { /* */ } }
+                st.gap = null; render(); return;
+            }
+            // Reflect what landed in the open drawer (and keep saveDetails'
+            // changed-detection honest by updating both sides), then refresh
+            // the grid quietly.
+            if (d.written.album != null) { st.al = String(d.written.album); song.album = st.al; }
+            if (d.written.year != null) { st.y = String(d.written.year); song.year = d.written.year; }
+            st.gap = { written: d.written }; render();
+            try { reload(); } catch (_) { /* not on the songs grid */ }
+        });
     }
 
     // Normalize + append a tag to the drawer's working set (mirrors the server's
@@ -2535,6 +3403,10 @@
 
     function reload() {
         _clearLibraryScrollSnapshot();
+        // Any toolbar-driven change backs out of the artist sub-page — the new
+        // state describes a fresh browse, and the host toggles below re-show
+        // the picked view (mirrors how openAlbum's detail yields to a reload).
+        _dropArtistPageSilently();
         // Record the state this fetch reflects so a later sidebar return can
         // tell whether the grid is stale (e.g. an off-screen search changed
         // state.q) and needs a refresh rather than a scroll-preserving no-op.
@@ -2553,6 +3425,7 @@
         document.getElementById('v3-songs-gridsizer')?.classList.toggle('hidden', state.view !== 'grid');
         document.getElementById('v3-songs-tree')?.classList.toggle('hidden', state.view !== 'tree');
         document.getElementById('lib-folder-tree')?.classList.toggle('hidden', state.view !== 'folder');
+        document.getElementById('v3-songs-albums')?.classList.toggle('hidden', state.view !== 'albums');
         // Refresh the A–Z jump rail (shows only for the grid + alphabetical
         // sorts; hides itself otherwise). Independent of the grid load.
         refreshRail();
@@ -2564,7 +3437,7 @@
             _applyMainScrollTop(0);
             return _ensureFolderLibrary().then(() => window.folderLibrary?.load());
         }
-        const loaded = state.view === 'grid' ? loadGrid(true) : loadTree();
+        const loaded = state.view === 'grid' ? loadGrid(true) : state.view === 'albums' ? loadAlbums() : loadTree();
         _applyMainScrollTop(0);
         return loaded;
     }
@@ -2603,6 +3476,9 @@
             (async () => { state.accuracy = (await jget('/api/stats/best')) || {}; })(),
             jget('/api/library/tuning-names?provider=' + enc(state.provider)),
             loadArtistCatalog(),
+            // Artist-page gates (PR-B) ride the initial fetch batch so the
+            // first card paint already knows whether artist lines are links.
+            refreshArtistPageGates(),
         ]);
         state.tuningNames = (tn && tn.tunings) || [];
         try { const _g = await jget('/api/library/genres?provider=' + enc(state.provider)); state.genres = (_g && _g.genres) || []; } catch (e) { state.genres = []; }
@@ -2620,17 +3496,25 @@
             // shown by match-review.js (window.__fbMatchReviewChip), which
             // also owns the drawer the click opens.
             '<div class="flex items-baseline gap-3"><p class="text-fb-textDim text-sm" id="v3-songs-count"></p>' +
-            '<button id="v3-songs-match-review" class="hidden text-xs text-fb-primary hover:text-fb-primaryHi border border-fb-primary/40 rounded-full px-2.5 py-0.5"></button></div>' +
+            '<button id="v3-songs-match-review" class="hidden text-xs text-fb-primary hover:text-fb-primaryHi border border-fb-primary/40 rounded-full px-2.5 py-0.5"></button>' +
+            // Batch progress for the Refresh Metadata button (shown only while a
+            // pass runs). A real songs-processed ratio, not a fake per-song %.
+            '<span id="v3-meta-progress" class="hidden items-center gap-2 text-xs text-fb-textDim">' +
+            '<span id="v3-meta-progress-label"></span>' +
+            '<span class="inline-block w-24 rounded-full bg-fb-border/40 overflow-hidden align-middle" style="height:6px"><span id="v3-meta-progress-fill" class="block h-full bg-fb-primary transition-all" style="width:0%"></span></span>' +
+            '</span></div>' +
             '<div class="flex flex-wrap gap-2">' +
             (providers.length > 1 ? '<select id="v3-songs-provider" class="' + ctrl + '">' + provOpts + '</select>' : '') +
             '<select id="v3-songs-artist" class="' + ctrl + ' max-w-[11rem]" aria-label="Artist">' + artistSelectHtml() + '</select>' +
             '<select id="v3-songs-album" class="' + ctrl + ' max-w-[11rem]" aria-label="Album"' + (state.artist ? '' : ' disabled') + '>' + albumSelectHtml() + '</select>' +
-            '<div class="flex rounded-md overflow-hidden border border-gray-700"><button id="v3-songs-grid-btn" class="px-3 py-2 text-sm">▦</button><button id="v3-songs-tree-btn" class="px-3 py-2 text-sm">≣</button><button id="v3-songs-folder-btn" class="px-3 py-2 text-sm" style="display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:2.25rem"><svg fill="currentColor" viewBox="0 0 16 16" style="width:12px;height:12px;flex-shrink:0"><path d="M1 3.5A1.5 1.5 0 012.5 2h3.086a1.5 1.5 0 011.06.44l.915.914H13.5A1.5 1.5 0 0115 4.914V12.5a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z"/></svg></button></div>' +
+            '<div class="flex rounded-md overflow-hidden border border-gray-700"><button id="v3-songs-grid-btn" class="px-3 py-2 text-sm">▦</button><button id="v3-songs-tree-btn" class="px-3 py-2 text-sm">≣</button><button id="v3-songs-albums-btn" title="Albums" class="px-3 py-2 text-sm">💿</button><button id="v3-songs-folder-btn" class="px-3 py-2 text-sm" style="display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;width:2.25rem"><svg fill="currentColor" viewBox="0 0 16 16" style="width:12px;height:12px;flex-shrink:0"><path d="M1 3.5A1.5 1.5 0 012.5 2h3.086a1.5 1.5 0 011.06.44l.915.914H13.5A1.5 1.5 0 0115 4.914V12.5a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 12.5v-9z"/></svg></button></div>' +
             '<select id="v3-songs-sort" class="' + ctrl + '">' + opt(SORTS, state.sort) + '</select>' +
             '<select id="v3-songs-format" class="' + ctrl + '">' + opt(FORMATS, state.format) + '</select>' +
             '<button id="v3-songs-filters" class="relative ' + ctrl + ' flex items-center gap-2">Filters<span id="v3-songs-filter-count" class="hidden bg-fb-primary text-white text-xs rounded-full px-1.5">0</span></button>' +
             '<button id="v3-songs-select" class="' + ctrl + (state.selectMode ? ' bg-fb-primary text-white' : '') + '">Select</button>' +
             '<button id="v3-songs-refresh" title="Refresh library (scan for new songs)" class="' + ctrl + '">⟳ Refresh</button>' +
+            '<button id="v3-songs-refresh-meta" title="Refresh metadata for the songs shown (re-match titles, artwork &amp; more)" class="' + ctrl + '">🏷 Metadata</button>' +
+            '<button id="v3-songs-unmatched" title="Show only songs with no metadata match" class="' + ctrl + ((state.filters.match || []).includes('unmatched') ? ' bg-fb-primary text-white' : '') + '">Unmatched</button>' +
             '<button id="v3-songs-upload" class="' + ctrl + '">Upload</button>' +
             '</div></div></div>' +
             // Practice-aware library home: a repertoire progress meter + a
@@ -2645,6 +3529,10 @@
             '<div id="v3-songs-grid" class="v3-grid-window grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-4"></div>' +
             '</div>' +
             '<div id="v3-songs-tree" class="hidden"></div>' +
+            '<div id="v3-songs-albums" class="hidden"></div>' +
+            // Artist page host (PR-B) — an openAlbum-style in-place sub-render;
+            // populated + shown by openArtistPage, cleared on close/reload.
+            '<div id="v3-songs-artistpage" class="hidden"></div>' +
             '<div id="lib-folder-controls" style="display:none"></div>' +
             '<div id="lib-folder-tree" class="space-y-1 hidden"></div>' +
             '<div id="v3-songs-sentinel" class="h-8"></div>' +
@@ -2664,6 +3552,7 @@
             state.artist = '';
             state.album = '';
             try { sm.libraryProviders && await sm.libraryProviders.select(state.provider); } catch (err) { /* */ }
+            _updateMetaBtnVisibility();   // enrichment is local-only
             await loadArtistCatalog();
             refreshArtistAlbumSelects();
             reload();
@@ -2693,6 +3582,11 @@
         });
         byId('v3-songs-select').addEventListener('click', () => setSelectMode(!state.selectMode));
         byId('v3-songs-refresh')?.addEventListener('click', refreshLibrary);
+        // Refresh Metadata: local-only, so hide it for remote providers. The
+        // button doubles as its own Stop while a pass runs (see onMetaBtnClick).
+        byId('v3-songs-refresh-meta')?.addEventListener('click', onMetaBtnClick);
+        byId('v3-songs-unmatched')?.addEventListener('click', toggleUnmatchedFilter);
+        _updateMetaBtnVisibility();
         // Reflect a scan already in progress (Settings button or a background
         // pass) on the Refresh button, so its state isn't just tied to clicks here.
         (async () => {
@@ -2702,46 +3596,39 @@
                 if (sd && sd.running) { _setRefreshState(sd); _watchScan({ announce: false }); }
             } catch (e) { /* */ }
         })();
+        // Reflect an enrichment pass already running (Settings "Match now" or a
+        // post-scan background pass) on the Metadata button + bar.
+        (async () => {
+            try {
+                const r = await fetch('/api/enrichment/status');
+                const es = r.ok ? await r.json() : null;
+                if (es && es.running) { _setMetaState(es); _watchEnrich({ announce: false }); }
+            } catch (e) { /* */ }
+        })();
 
-        // Bulletproof multi-select: in select mode, a capture-phase click on the
-        // grid toggles the card and STOPS the event, so nothing (a per-card
-        // handler, a stray/legacy listener, an arrangement chip) can start
-        // playback. Fixes "checkbox click opens the song / access-denied".
-        const gridEl = byId('v3-songs-grid');
-        if (gridEl) gridEl.addEventListener('click', (e) => {
-            if (!state.selectMode) return;
-            const card = e.target.closest('[data-fn]');
-            if (!card || !gridEl.contains(card)) return;
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            toggleSelect(card.getAttribute('data-fn'), card);
-        }, true);
-
-        // Same bulletproof guard for the list/tree view. Without it, clicking a
-        // song row (or its arrangement chip) in select mode falls through to the
-        // per-card play handler and starts playback instead of selecting. The
-        // <summary> group headers sit OUTSIDE any [data-fn], so closest() is null
-        // for them and their native expand/collapse is left untouched.
-        const treeEl = byId('v3-songs-tree');
-        if (treeEl) treeEl.addEventListener('click', (e) => {
-            if (!state.selectMode) return;
-            const card = e.target.closest('[data-fn]');
-            if (!card || !treeEl.contains(card)) return;
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            toggleSelect(card.getAttribute('data-fn'), card);
-        }, true);
+        // Capture-phase select-mode guard on each persistent list host. Without
+        // it, clicking a card/row (or its arrangement chip) in select mode falls
+        // through to the per-card play handler and starts playback instead of
+        // selecting ("checkbox click opens the song / access-denied"). The artist
+        // page renders the same [data-fn] song rows into its own host, so it
+        // needs the guard too — otherwise a row click there plays instead of
+        // toggling when select mode is already on.
+        bindSelectGuard(byId('v3-songs-grid'));
+        bindSelectGuard(byId('v3-songs-tree'));
+        bindSelectGuard(byId('v3-songs-artistpage'));
         const setView = async (v) => {
             state.view = v;
             byId('v3-songs-grid-btn').className = 'px-3 py-2 text-sm ' + (v === 'grid' ? 'bg-fb-primary text-white' : 'text-fb-textDim');
             byId('v3-songs-tree-btn').className = 'px-3 py-2 text-sm ' + (v === 'tree' ? 'bg-fb-primary text-white' : 'text-fb-textDim');
             byId('v3-songs-folder-btn').className = 'px-3 py-2 text-sm ' + (v === 'folder' ? 'bg-fb-primary text-white' : 'text-fb-textDim');
+            { const ab = byId('v3-songs-albums-btn'); if (ab) ab.className = 'px-3 py-2 text-sm ' + (v === 'albums' ? 'bg-fb-primary text-white' : 'text-fb-textDim'); }
             if (v === 'folder') await _ensureFolderLibrary();
             return reload();
         };
         byId('v3-songs-grid-btn').addEventListener('click', () => setView('grid'));
         byId('v3-songs-tree-btn').addEventListener('click', () => setView('tree'));
         byId('v3-songs-folder-btn').addEventListener('click', () => setView('folder'));
+        byId('v3-songs-albums-btn')?.addEventListener('click', () => setView('albums'));
         // Await the initial load so a caller awaiting render() (the scroll
         // restore on screen re-entry) sees a populated grid + real state.total
         // before it tries to page deeper.
@@ -2759,6 +3646,18 @@
         // from scratch instead of restoring a cached (possibly empty, pre-DLC)
         // snapshot. Must win over every fast-path below.
         if (_libraryDirty) { _libraryDirty = false; await reload(); return; }
+        // Keep the entry-point gates current (a Settings visit may have
+        // toggled artist pages / external links). Fire-and-forget.
+        refreshArtistPageGates();
+        // An open artist sub-page survives a screen bounce as-is — its DOM is
+        // self-contained. A torn-down/hidden host means the state is stale;
+        // clear it and fall through to the normal restore paths.
+        if (state.artistPage) {
+            const ah = document.getElementById('v3-songs-artistpage');
+            if (ah && !ah.classList.contains('hidden') && ah.childElementCount) return;
+            state.artistPage = null;
+            state.artistReturnScroll = null;
+        }
         // Pull in any scores recorded while the library was off-screen (the usual
         // play→return flow) before the fast-paths below restore the cached DOM,
         // so the just-played song's badge is current. The full render() path
@@ -2922,6 +3821,215 @@
                 if (sawRunning) reload();
             }
         }, 1000);
+    }
+
+    // ── Refresh Metadata (batch enrichment) from the Songs toolbar ─────────────
+    // The metadata counterpart to ⟳ Refresh (which scans FILES): matches
+    // titles/artist/album/artwork against MusicBrainz for the songs that still
+    // need it — the ambient background matcher, run on demand (a media-server's
+    // "Refresh Metadata" vs "Scan Files"). Mirrors the scan machinery: a 1 Hz
+    // poll of /api/enrichment/status drives the button + batch bar, while
+    // /api/enrichment/states drives per-tile badges on the visible window.
+    // Enrichment is local-only, so the button hides for remote providers.
+    let _metaPoll = null;
+    let _metaRunning = false;
+
+    function _updateMetaBtnVisibility() {
+        const local = state.provider === 'local';   // enrichment + its filter are local-only
+        const btn = document.getElementById('v3-songs-refresh-meta');
+        if (btn) btn.style.display = local ? '' : 'none';
+        const um = document.getElementById('v3-songs-unmatched');
+        if (um) um.style.display = local ? '' : 'none';
+    }
+
+    // Quick "Show unmatched" — the same filter as the drawer's Match → Unmatched,
+    // one click from the toolbar so the no-match pile is reachable right after a
+    // batch. Toggles the button + re-queries the grid.
+    function toggleUnmatchedFilter() {
+        const m = state.filters.match || (state.filters.match = []);
+        const i = m.indexOf('unmatched');
+        const on = i < 0;
+        if (on) m.push('unmatched'); else m.splice(i, 1);
+        const btn = document.getElementById('v3-songs-unmatched');
+        if (btn) { btn.classList.toggle('bg-fb-primary', on); btn.classList.toggle('text-white', on); }
+        reload();
+    }
+
+    // The local filenames the grid is currently SHOWING (data-fn is the local
+    // filename the enrichment cache keys on). The grid is windowed, so this is
+    // the visible slice only — exactly what the per-tile poll should cover.
+    function _visibleLocalFilenames() {
+        const grid = document.getElementById('v3-songs-grid');
+        if (!grid) return [];
+        return [...grid.querySelectorAll('[data-fn]')]
+            .map((el) => el.getAttribute('data-fn')).filter(Boolean);
+    }
+
+    // Set/clear one card's live badge (recycled cards re-derive from _metaTile on
+    // the next paint, so update the map too — mirrors _patchCardFav).
+    function _patchCardEnrich(fn, st) {
+        if (st) _metaTile[fn] = st; else delete _metaTile[fn];
+        const sel = (window.CSS && CSS.escape) ? CSS.escape(fn) : fn;
+        document.querySelectorAll('[data-fn="' + sel + '"] [data-v3-play]').forEach((play) => {
+            const el = play.querySelector('.v3-meta-tile');
+            const html = enrichBadge(fn);
+            if (!html) { if (el) el.remove(); return; }
+            if (el) el.outerHTML = html; else play.insertAdjacentHTML('beforeend', html);
+        });
+    }
+
+    function _clearMetaTiles() {
+        Object.keys(_metaTile).forEach((fn) => { delete _metaTile[fn]; });
+        document.querySelectorAll('.v3-meta-tile').forEach((el) => el.remove());
+        // The persistent "No match" badge derives from _unmatched (not _metaTile),
+        // yet shares the .v3-meta-tile class — so the blanket remove above strips it.
+        // Repaint the resting indicator on any rendered card so a metadata rescan's
+        // tile-clear doesn't silently drop it until the next scroll/re-render.
+        _unmatched.forEach((fn) => {
+            const sel = (window.CSS && CSS.escape) ? CSS.escape(fn) : fn;
+            document.querySelectorAll('[data-fn="' + sel + '"] [data-v3-play]').forEach((play) => {
+                if (play.querySelector('.v3-meta-tile')) return;
+                const html = enrichBadge(fn);
+                if (html) play.insertAdjacentHTML('beforeend', html);
+            });
+        });
+    }
+
+
+    // Drive the button (which doubles as Stop) + the batch bar from a status body.
+    function _setMetaState(es) {
+        const btn = document.getElementById('v3-songs-refresh-meta');
+        const prog = document.getElementById('v3-meta-progress');
+        const fill = document.getElementById('v3-meta-progress-fill');
+        const label = document.getElementById('v3-meta-progress-label');
+        if (!btn) return;
+        const running = !!(es && es.running);
+        _metaRunning = running;
+        if (running) {
+            const total = (es && es.total) || 0, done = (es && es.matched) || 0;
+            const cancelling = !!(es && es.cancelling);
+            btn.textContent = cancelling ? 'Stopping…' : ('⏹ Stop' + (total ? ' · ' + done + '/' + total : ''));
+            btn.disabled = cancelling;
+            btn.classList.toggle('opacity-70', cancelling);
+            btn.title = cancelling ? 'Stopping after the current song…' : 'Stop refreshing metadata';
+            if (prog) {
+                prog.classList.remove('hidden'); prog.classList.add('flex');
+                if (label) label.textContent = total ? ('Matching metadata ' + done + '/' + total) : 'Matching metadata…';
+                // Real songs-processed ratio; a tiny sliver while the queue size
+                // is still being computed (phase 1) so the bar isn't dead-empty.
+                if (fill) fill.style.width = (total ? Math.round((done / total) * 100) : 6) + '%';
+            }
+        } else {
+            btn.textContent = '🏷 Metadata';
+            btn.disabled = false;
+            btn.classList.remove('opacity-70');
+            btn.title = 'Refresh metadata for the songs shown (re-match titles, artwork & more)';
+            if (prog) { prog.classList.add('hidden'); prog.classList.remove('flex'); }
+        }
+    }
+
+    // Completion toast — reuse the shared fbNotify surface (visual-only, so
+    // hearing-safe for free). Honest + never-punishing copy, in-game suppressed.
+    function _metaCompleteToast(es) {
+        const active = document.querySelector('.screen.active');
+        if (active && active.id === 'player') return;
+        if (!window.fbNotify) return;
+        const matched = (es && es.matched) || 0;
+        const msg = matched
+            ? (matched + ' song' + (matched === 1 ? '' : 's') + ' matched')
+            : 'Your library metadata is up to date';
+        try { window.fbNotify.show({ title: 'Metadata refresh complete', message: msg, icon: '🏷️', accent: '#22C55E' }); } catch (e) { /* */ }
+    }
+
+    // Poll enrichment status (button + bar) AND the visible window's per-song
+    // states (tile badges) until the pass finishes. announce:false = we only
+    // attached to a pass we didn't start (no toast unless it actually changed
+    // something).
+    function _watchEnrich(opts) {
+        if (_metaPoll) return;
+        const announce = !opts || opts.announce !== false;
+        let sawRunning = false, ticks = 0, lastStatus = null;
+        _metaPoll = setInterval(async () => {
+            ticks++;
+            let es = null;
+            try { const r = await fetch('/api/enrichment/status'); if (r.ok) es = await r.json(); } catch (e) { /* */ }
+            if (es) { lastStatus = es; _setMetaState(es); if (es.running) sawRunning = true; }
+            // Per-tile badges: only songs we're tracking (seeded 'queued'). A
+            // tile flips to 'working' when it's the current song, then to
+            // 'done' (matched) / 'nochange' (failed) once it leaves unscanned.
+            if (Object.keys(_metaTile).length) {
+                const fns = _visibleLocalFilenames();
+                try {
+                    const r = await fetch('/api/enrichment/states', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ filenames: fns }),
+                    });
+                    if (r.ok) {
+                        const j = await r.json();
+                        const states = j.states || {}, current = j.current;
+                        fns.forEach((fn) => {
+                            if (!(fn in _metaTile)) return;
+                            if (fn === current) { _patchCardEnrich(fn, 'working'); return; }
+                            const s = states[fn];
+                            if (s && s !== 'unscanned' && s !== 'pending') {
+                                _patchCardEnrich(fn, s === 'failed' ? 'nochange' : 'done');
+                            }
+                        });
+                    }
+                } catch (e) { /* */ }
+            }
+            // Cap at 20 min (a ~1000-song trickle at ≤1/s is ~17 min); a
+            // user-initiated no-op that never saw a running pass ends quickly.
+            const noopDone = announce && !sawRunning && ticks >= 3;
+            if ((sawRunning && es && !es.running) || noopDone || ticks >= 1200) {
+                clearInterval(_metaPoll); _metaPoll = null;
+                _setMetaState(null);
+                const changed = sawRunning && lastStatus && (lastStatus.matched || 0) > 0;
+                if (announce || changed) _metaCompleteToast(lastStatus);
+                // Let the final 'done' badges register, then clear + (if anything
+                // matched) reload so new canonical titles/art show.
+                setTimeout(() => {
+                    _clearMetaTiles();
+                    if (changed && window.feedBack) { try { window.feedBack.emit('library:changed', { reason: 'enrich', matched: lastStatus.matched }); } catch (e) { /* */ } }
+                }, 1600);
+            }
+        }, 1000);
+    }
+
+    // Force a fresh re-match of the songs currently SHOWN (the visible grid
+    // window) — a media-server-style per-view "Refresh Metadata". Resets those
+    // songs and re-fetches, so it's visible even on an already-matched library.
+    // Manual pins are skipped server-side; scoped to the visible set so it's
+    // fast + can't blow the whole rate budget.
+    async function refreshMetadata() {
+        if (_metaRunning || _metaPoll) return;       // already running
+        const fns = _visibleLocalFilenames();
+        _clearMetaTiles();
+        if (!fns.length) { _metaCompleteToast({ matched: 0 }); return; }
+        let queued = [];
+        try {
+            const r = await fetch('/api/enrichment/rematch', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filenames: fns }),
+            });
+            if (r.ok) queued = (await r.json()).queued || [];
+        } catch (e) { /* offline → nothing queued */ }
+        // Badge exactly what the server queued (everything visible except your
+        // manual pins). Nothing queued = all visible songs are pinned/unknown.
+        queued.forEach((fn) => _patchCardEnrich(fn, 'queued'));
+        if (!queued.length) { _metaCompleteToast({ matched: 0 }); return; }
+        _watchEnrich({ announce: true });
+    }
+
+    async function stopMetadata() {
+        try { await fetch('/api/enrichment/cancel', { method: 'POST' }); } catch (e) { /* */ }
+        _setMetaState({ running: true, cancelling: true });   // optimistic; the poll confirms
+    }
+
+    // The Metadata button toggles role: kick a refresh when idle, Stop when a
+    // pass is running.
+    function onMetaBtnClick() {
+        if (_metaRunning) stopMetadata(); else refreshMetadata();
     }
 
     // Topbar search drives this screen.

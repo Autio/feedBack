@@ -60,6 +60,7 @@ def _cleanup(server, client):
         server._DEMO_JANITOR_HOOKS.clear()
     conn = getattr(getattr(server, "meta_db", None), "conn", None)
     if conn is not None:
+        getattr(__import__("sys").modules.get("server"), "_join_background_db_threads", lambda: None)()
         conn.close()
 
 
@@ -98,6 +99,14 @@ def test_demo_off_settings_post_not_blocked(tmp_path, monkeypatch):
     ("POST",   "/api/enrichment/review/some-file/pick"),
     ("POST",   "/api/enrichment/kick"),
     ("GET",    "/api/enrichment/search"),
+    # Context menus (R2): per-song re-match + the path-exposing Get info.
+    ("POST",   "/api/enrichment/refresh/some-file"),
+    ("GET",    "/api/chart/some-file/fileinfo"),
+    # Art layer (R3): the base64 upload writes files, the server-side URL fetch
+    # touches the network, and the override delete removes files — all mutations.
+    ("POST",   "/api/song/some-file/art/upload"),
+    ("POST",   "/api/song/some-file/art/url"),
+    ("DELETE", "/api/art/some-file/override"),
 ])
 def test_demo_on_blocked_routes_return_403(tmp_path, monkeypatch, method, path):
     server, client = _make_client(tmp_path, monkeypatch, demo=True)
@@ -303,6 +312,7 @@ def test_register_demo_janitor_hook_in_plugin_context(tmp_path, monkeypatch):
 
     conn = getattr(getattr(server, "meta_db", None), "conn", None)
     if conn is not None:
+        getattr(__import__("sys").modules.get("server"), "_join_background_db_threads", lambda: None)()
         conn.close()
     # Clean up janitor state so it doesn't bleed into other tests.
     server._DEMO_JANITOR_STOP.set()

@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import secrets
+import stat
 import sys
 import tempfile
 import shutil
@@ -42,7 +43,12 @@ from song import (
     scale_degree_for_pitch,
 )
 from audio import find_wem_files, convert_wem
-from tunings import tuning_name, DEFAULT_TUNINGS, DEFAULT_REFERENCE_PITCH, apply_reference_pitch
+from tunings import (
+    DEFAULT_REFERENCE_PITCH, DEFAULT_TUNINGS, PROFILE_IDS, PROFILE_PATHWAYS,
+    apply_flat_instrument_patch_to_profiles, apply_reference_pitch,
+    normalize_instrument_profile, normalize_instrument_profiles,
+    settings_with_instrument_profiles, tuning_name,
+)
 import sloppak as sloppak_mod
 import drums as drums_mod
 import notation as notation_mod
@@ -51,6 +57,7 @@ import loosefolder as loosefolder_mod
 # tier classification + response parsing. No network/DB in there — the
 # throttled transport and the song_enrichment writes live in this module.
 import mb_match
+import acoustid_match
 # Metadata extraction lives in a side-effect-free module so ProcessPool
 # scan workers can import + unpickle _scan_one without re-running this
 # module's import-time side effects (see lib/scan_worker.py).
@@ -192,6 +199,7 @@ _DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
     ("DELETE", re.compile(r"^/api/audio-effects/active-mapping$")),
     ("POST",   re.compile(r"^/api/song/.*/meta$")),
     ("POST",   re.compile(r"^/api/song/.*/art/upload$")),
+    ("PUT",    re.compile(r"^/api/song/.+/overrides$")),
     ("GET",    re.compile(r"^/api/plugins/updates$")),
     ("POST",   re.compile(r"^/api/plugins/[^/]+/update$")),
     ("POST",   re.compile(r"^/api/plugins/editor/save$")),
@@ -239,7 +247,36 @@ _DEMO_BLOCKED: list[tuple[str, re.Pattern]] = [
     # anonymous demo visitors (they'd spend the shared rate limit).
     ("POST",   re.compile(r"^/api/enrichment/review/.+$")),
     ("POST",   re.compile(r"^/api/enrichment/kick$")),
+    ("POST",   re.compile(r"^/api/enrichment/cancel$")),
+    ("POST",   re.compile(r"^/api/enrichment/rematch$")),
     ("GET",    re.compile(r"^/api/enrichment/search$")),
+    # AcoustID audio fingerprinting: both identify endpoints run fpcalc (CPU)
+    # and spend the shared AcoustID rate budget on the caller's behalf — same
+    # rule as the search/kick relays above; not for anonymous demo visitors.
+    ("POST",   re.compile(r"^/api/enrichment/identify$")),
+    ("POST",   re.compile(r"^/api/enrichment/identify/.+$")),
+    # Context menus (R2): the per-song re-match mutates the cache + spends
+    # rate limit; Get-info exposes filesystem paths.
+    ("POST",   re.compile(r"^/api/enrichment/refresh/.+$")),
+    ("GET",    re.compile(r"^/api/chart/.+/fileinfo$")),
+    # Gap-fill (R4a) rewrites pack files on disk — never for demo visitors.
+    ("POST",   re.compile(r"^/api/song/.+/gap-fill$")),
+    # Art layer (R3): all three mutate server state / touch the network on a
+    # visitor's behalf — the base64 upload writes files, the URL fetch makes the
+    # server request arbitrary images, and the override delete removes files.
+    ("POST",   re.compile(r"^/api/song/.+/art/upload$")),
+    ("POST",   re.compile(r"^/api/song/.+/art/url$")),
+    ("DELETE", re.compile(r"^/api/art/.+/override$")),
+    # Cover picker (PR-C): read-only, but a cache-miss open spends 1-3
+    # throttled Cover Art Archive calls — anonymous demo visitors don't get
+    # to spend the shared rate budget (same rule as enrichment search/kick).
+    ("GET",    re.compile(r"^/api/song/.+/art/candidates$")),
+    # Artist pages (PR-B): the links GET lazily fetches from MusicBrainz on a
+    # visitor's behalf AND writes the artist_enrichment cache; refresh
+    # re-spends the shared rate limit. The /page route stays open (all-local
+    # read). Same rationale as /api/enrichment/search above.
+    ("GET",    re.compile(r"^/api/artist/.+/links$")),
+    ("POST",   re.compile(r"^/api/artist/.+/links/refresh$")),
 ]
 
 
@@ -451,8 +488,12 @@ def _apply_pending_db_restore(config_dir: Path) -> None:
 # TOTAL — which also fixes a latent OFFSET skip/dupe across equal-key rows.
 # (column, collate-clause, primary-direction) — tiebreak is always `filename` ASC.
 _KEYSET_SORTS = {
-    "artist": ("artist", "COLLATE NOCASE", "ASC"),
-    "artist-desc": ("artist", "COLLATE NOCASE", "DESC"),
+    # artist/artist-desc left OUT deliberately: their ORDER BY carries a
+    # title secondary (so cards within an artist read alphabetically, like
+    # the tree view) which a two-term (value, filename) cursor can't seek
+    # correctly — they page by OFFSET, which is measured-trivial at real
+    # library sizes. Restore them with a composite sort-key column if
+    # 50k-song libraries ever make OFFSET hurt.
     "title": ("title", "COLLATE NOCASE", "ASC"),
     "title-desc": ("title", "COLLATE NOCASE", "DESC"),
     "recent": ("mtime", "", "DESC"),
@@ -515,7 +556,13 @@ def next_library_cursor(sort: str, last_song: dict | None) -> str | None:
     key = "mtime" if col == "mtime" else col
     if key not in last_song or "filename" not in last_song:
         return None
-    return _encode_cursor([last_song[key], last_song["filename"]])
+    # A title display-override (Fix-metadata popup) replaces last_song["title"]
+    # for the card, but the keyset seek runs on the RAW title column — resume
+    # from the raw value query_page stashed (present only when the last row's
+    # title was overridden), so paging never skips/dupes.
+    val = (last_song["_sort_title"] if (key == "title" and "_sort_title" in last_song)
+           else last_song[key])
+    return _encode_cursor([val, last_song["filename"]])
 
 
 # Song-level "mastered" threshold — best accuracy across a song's arrangements
@@ -551,7 +598,9 @@ class MetadataDB:
                 tuning_name TEXT DEFAULT '',
                 tuning_sort_key INTEGER DEFAULT 0,
                 tuning_offsets TEXT DEFAULT '',
-                genre TEXT DEFAULT ''
+                genre TEXT DEFAULT '',
+                track_number INTEGER,
+                disc INTEGER
             )
         """)
         # Idempotent migrations for installs that predate each column.
@@ -573,6 +622,11 @@ class MetadataDB:
             # Primary genre from the feedpak `genres` list (spec 1.12.0). Cache;
             # repopulated on rescan.
             "ALTER TABLE songs ADD COLUMN genre TEXT DEFAULT ''",
+            # Album track order from the feedpak `track`/`disc` fields (spec
+            # 1.12.0). NULL when the pack doesn't author them; the album view
+            # falls back to title order. Cache; repopulated on rescan.
+            "ALTER TABLE songs ADD COLUMN track_number INTEGER",
+            "ALTER TABLE songs ADD COLUMN disc INTEGER",
         ):
             try:
                 self.conn.execute(ddl)
@@ -620,6 +674,26 @@ class MetadataDB:
             )
         """)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_song_tags_tag ON song_tags(tag COLLATE NOCASE)")
+        # Per-field metadata OVERRIDES + LOCKS (the Fix-metadata popup). A
+        # reversible DISPLAY overlay, never written to the pack: `value` is the
+        # user's corrected value for a catalog field (title/artist/album/year/
+        # genre), `locked=1` pins the field so a metadata refresh / auto-match
+        # never changes what's shown for it (Plex-style field lock). Effective
+        # display value = override → matched-MusicBrainz → pack → derived.
+        # Filename-keyed → purged with the song on delete_song, NEVER on a
+        # rescan (delete_missing), so an edit survives re-import like every other
+        # local layer.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS song_field_override (
+                filename TEXT NOT NULL,
+                field TEXT NOT NULL,        -- title|artist|album|year|genre
+                value TEXT,                 -- corrected value (NULL = lock only, no override)
+                locked INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                PRIMARY KEY (filename, field)
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_field_override_fn ON song_field_override(filename)")
         # Artist-name aliases (P4): "ACDC" → "AC/DC", "the beatles" → "The Beatles".
         # A CANONICALIZATION OVERRIDE applied AT DISPLAY only — the scanner-derived
         # `songs.artist` and the feedpak files are never rewritten (a rescan can't
@@ -870,14 +944,39 @@ class MetadataDB:
         # MusicBrainz just to render; `last_attempt_at` anchors the failed-row
         # retry backoff (epoch seconds). Idempotent ALTERs, same pattern as
         # the `songs` migrations above.
+        # R1 scraper options: `apply_mask` records which per-field auto-apply
+        # toggles were OFF (suppressed) when an AUTOMATIC match settled the row,
+        # as a canonical sorted comma-joined marker of blocked keys (''/NULL =
+        # nothing suppressed). It keeps the per-field toggles to the same
+        # "nothing forfeited" contract as the source/art toggles: re-enabling a
+        # field re-queues affected `matched` rows for backfill (enrichment_pending)
+        # and a partially-applied row is barred from seeding siblings
+        # (enrichment_cache_lookup). Idempotent ALTER, same pattern as above.
         for ddl in (
             "ALTER TABLE song_enrichment ADD COLUMN candidates TEXT",
             "ALTER TABLE song_enrichment ADD COLUMN last_attempt_at REAL",
+            "ALTER TABLE song_enrichment ADD COLUMN apply_mask TEXT",
         ):
             try:
                 self.conn.execute(ddl)
             except sqlite3.OperationalError:
                 pass
+        # Artist-level enrichment cache (artist pages, launch charrette §5):
+        # ONE row per matched MusicBrainz artist holding the whitelisted
+        # url-relations (external links) + MB genres from a single throttled
+        # artist lookup, fetched lazily on the first artist-page links request
+        # and refreshed only on demand. Keyed by mb_artist_id (NOT the display
+        # name), so alias merges / renames never orphan it. Never purged on
+        # rescan — like song_enrichment, it is re-derivable but expensive
+        # (rate-limited) to re-fetch. Additive + idempotent.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS artist_enrichment (
+                mb_artist_id TEXT PRIMARY KEY,
+                url_rels TEXT,
+                genres TEXT,
+                fetched_at TEXT
+            )
+        """)
         # Progression (spec 010): instrument paths, challenges, quests, the
         # Decibels wallet, and the cosmetics shop. Targets/titles live in the
         # bundled content (data/progression/); these tables hold only player
@@ -1096,6 +1195,125 @@ class MetadataDB:
             self.conn.commit()
         return self.get_song_user_meta(filename)
 
+    # ── Per-field metadata overrides + locks (Fix-metadata popup) ─────────────
+    def get_song_overrides(self, filename: str) -> dict:
+        """{field: {"value": str|None, "locked": bool}} for one song."""
+        rows = self.conn.execute(
+            "SELECT field, value, locked FROM song_field_override WHERE filename = ?",
+            (filename,)).fetchall()
+        return {r[0]: {"value": r[1], "locked": bool(r[2])} for r in rows}
+
+    def set_song_override(self, filename: str, field: str, *,
+                          value="__keep__", locked="__keep__") -> dict:
+        """Partial upsert of one field's override value and/or lock. Pass a
+        value/locked to set it or leave the sentinel to keep the current one. A
+        row with neither a value nor a lock is dropped (no empty shell). Returns
+        the song's full override map."""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT value, locked FROM song_field_override WHERE filename = ? AND field = ?",
+                (filename, field)).fetchone()
+            new_val = (cur[0] if cur else None) if value == "__keep__" else value
+            new_lock = (bool(cur[1]) if cur else False) if locked == "__keep__" else bool(locked)
+            new_val = (new_val or "").strip() or None
+            if new_val is None and not new_lock:
+                self.conn.execute(
+                    "DELETE FROM song_field_override WHERE filename = ? AND field = ?",
+                    (filename, field))
+            else:
+                self.conn.execute(
+                    "INSERT INTO song_field_override (filename, field, value, locked, updated_at) "
+                    "VALUES (?, ?, ?, ?, datetime('now')) "
+                    "ON CONFLICT(filename, field) DO UPDATE SET "
+                    "value = excluded.value, locked = excluded.locked, updated_at = excluded.updated_at",
+                    (filename, field, new_val, 1 if new_lock else 0))
+            self.conn.commit()
+        return self.get_song_overrides(filename)
+
+    def locked_fields(self, filename: str) -> set:
+        """The catalog fields the user LOCKED for a song (Fix-metadata popup).
+        An automatic match must never (re)canonicalize these, and gap-fill must
+        never write them to the file. Locked read (the enrichment worker calls
+        it), minimal projection."""
+        with self._lock:
+            return {r[0] for r in self.conn.execute(
+                "SELECT field FROM song_field_override WHERE filename = ? AND locked = 1",
+                (filename,)).fetchall()}
+
+    def clear_song_override(self, filename: str, field: str) -> dict:
+        """Remove a field's override + lock entirely (revert to the resolved
+        pack/matched value)."""
+        with self._lock:
+            self.conn.execute(
+                "DELETE FROM song_field_override WHERE filename = ? AND field = ?",
+                (filename, field))
+            self.conn.commit()
+        return self.get_song_overrides(filename)
+
+    def overrides_map(self, filenames) -> dict:
+        """{filename: {field: {value, locked}}} for a batch — feeds the grid's
+        effective-value resolution (display slice). Chunked under SQLite's
+        variable limit."""
+        fns = list(filenames)
+        out: dict = {}
+        for i in range(0, len(fns), 400):
+            chunk = fns[i:i + 400]
+            if not chunk:
+                break
+            q = ("SELECT filename, field, value, locked FROM song_field_override "
+                 "WHERE filename IN (%s)" % ",".join("?" * len(chunk)))
+            for fn, field, value, locked in self.conn.execute(q, chunk).fetchall():
+                out.setdefault(fn, {})[field] = {"value": value, "locked": bool(locked)}
+        return out
+
+    def _romaji_display(self, filename: str, artist: str, title: str):
+        """English-base display fallback. A blank-artist CDLC pack named
+        'Artist_Title_v1_p' has no readable name (artist blank; title = the raw
+        filename), and a match would fill it with the artist's NATIVE script
+        (kanji/kana). Surface the author's own romaji parsed from the filename
+        instead, so an English base reads 'Junko Yagami - BAY CITY'. Only kicks in
+        when the pack has no artist of its own — a real pack artist is untouched."""
+        if (artist or "").strip():
+            return artist, title
+        d = _artist_title_from_filename(filename)
+        return (d["artist"], d["title"]) if d else (artist, title)
+
+    def pack_fields(self, filename: str) -> dict:
+        """The stored (pack) values for the overridable catalog fields — the
+        Fix-metadata popup shows these behind each override as the 'revert to
+        pack' reference + the Yours/Pack provenance. Empty strings for a missing
+        song so the popup always has a value to render."""
+        keys = ("title", "artist", "album", "year", "genre")
+        row = self.conn.execute(
+            "SELECT title, artist, album, year, genre FROM songs WHERE filename = ?",
+            (filename,)).fetchone()
+        vals = {k: ((row[i] or "") if row else "") for i, k in enumerate(keys)}
+        # Baseline the author's romaji (from the filename) for a blank-artist pack,
+        # so the Details tab's Pack reference matches what the grid shows.
+        vals["artist"], vals["title"] = self._romaji_display(filename, vals["artist"], vals["title"])
+        return vals
+
+    # Effective genre = a per-song genre OVERRIDE (Fix-metadata popup) else the
+    # scanned pack genre. Applied at FILTER/FACET time (like the P4 artist alias)
+    # so a corrected genre is browsable — the correlated subquery is used ONLY
+    # when genre overrides actually exist; the common case stays on the plain
+    # indexed `genre` column. Genre stays a library-only overlay (it isn't a
+    # write-to-file field), so it never touches the pack.
+    _EFFECTIVE_GENRE_SQL = (
+        "COALESCE((SELECT o.value FROM song_field_override o "
+        "WHERE o.filename = songs.filename AND o.field = 'genre' "
+        "AND o.value IS NOT NULL AND o.value != ''), genre)"
+    )
+
+    def _has_genre_overrides(self) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM song_field_override WHERE field = 'genre' "
+            "AND value IS NOT NULL AND value != '' LIMIT 1").fetchone() is not None
+
+    def _effective_genre_expr(self) -> str:
+        """`genre` normally; the override-aware COALESCE only when overrides exist."""
+        return self._EFFECTIVE_GENRE_SQL if self._has_genre_overrides() else "genre"
+
     def set_song_tags(self, filename: str, tags) -> list:
         """Replace ALL of a song's tags with the given set (each normalized;
         blanks + case-dupes dropped). Full-replace so the whole personal-meta
@@ -1160,6 +1378,7 @@ class MetadataDB:
         INSIDE the caller's `meta_db._lock` — must not re-acquire the lock."""
         self.conn.execute("DELETE FROM song_user_meta WHERE filename = ?", (filename,))
         self.conn.execute("DELETE FROM song_tags WHERE filename = ?", (filename,))
+        self.conn.execute("DELETE FROM song_field_override WHERE filename = ?", (filename,))
 
     def batch_user_meta(self, filenames, *, set_difficulty="__keep__",
                         add_tags=None, remove_tags=None) -> int:
@@ -1877,6 +2096,181 @@ class MetadataDB:
         return [{"name": r[0], "count": r[1],
                  "canonical": amap.get((r[0] or "").lower(), r[0])} for r in rows]
 
+    # ── Artist pages (launch charrette PR-B) ─────────────────────────────────
+    # The artist page is "X *in your library*" — a shelf plus your relationship
+    # to it, never a discography browser (locked position 1). Everything here
+    # reads LOCAL rows only; the external-links layer (artist_enrichment) is a
+    # separate lazy cache keyed by mb_artist_id.
+
+    def artist_known_mb_id(self, variants: list) -> str | None:
+        """The artist's MusicBrainz id, if any of their songs' enrichment rows
+        carry one. Only `matched`/`manual` rows count (partial coverage is the
+        contract — degrade gracefully); the most common id wins so one stray
+        wrong match can't out-vote the rest of the shelf."""
+        if not variants:
+            return None
+        ph = ",".join(["?"] * len(variants))
+        row = self.conn.execute(
+            f"SELECT e.mb_artist_id, COUNT(*) c FROM song_enrichment e "
+            f"JOIN songs s ON s.filename = e.filename "
+            f"WHERE s.artist COLLATE NOCASE IN ({ph}) "
+            f"AND e.match_state IN ('matched', 'manual') "
+            f"AND e.mb_artist_id IS NOT NULL AND e.mb_artist_id != '' "
+            f"GROUP BY e.mb_artist_id ORDER BY c DESC, e.mb_artist_id LIMIT 1",
+            variants).fetchone()
+        return row[0] if row else None
+
+    def artist_page(self, name: str) -> dict:
+        """The all-LOCAL artist-page payload: canonical name (alias-aware),
+        the raw variants it merges, song/album counts, the albums list, the
+        mastered count (DENOMINATOR LAW, locked position 2: every number
+        counts songs YOU OWN — the WHERE is `artist IN (your variants)` over
+        `songs`, never anything external), mb_artist_id when known, header-
+        mosaic art, similar-in-library via genre co-occurrence (locked
+        position 3: only artists already in the library, empty → hidden), and
+        the play-all file list. An unknown name returns a zero-count page (an
+        unmatched artist is still a fully functional page)."""
+        from urllib.parse import quote
+        canonical = self._terminal_canonical((name or "").strip())
+        variants = self._raw_variants_for(canonical)
+        ph = ",".join(["?"] * len(variants)) if variants else "?"
+        rows = self.conn.execute(
+            f"SELECT filename, title, album, year, genre FROM songs "
+            f"WHERE title != '' AND artist COLLATE NOCASE IN ({ph}) "
+            f"ORDER BY album COLLATE NOCASE, (track_number IS NULL) ASC, "
+            f"COALESCE(disc, 1), track_number, title COLLATE NOCASE",
+            variants or [canonical]).fetchall()
+        # Albums: distinct non-empty album names in shelf order, each with the
+        # earliest authored year, a track count, and a representative cover
+        # song (the first row → also the mosaic's source).
+        albums: dict = {}
+        album_order: list = []
+        for fn, _t, album, year, _g in rows:
+            key = (album or "").strip()
+            if not key:
+                continue
+            k = key.lower()
+            if k not in albums:
+                albums[k] = {"name": key, "year": (year or ""), "count": 0, "cover": fn}
+                album_order.append(k)
+            albums[k]["count"] += 1
+            if not albums[k]["year"] and year:
+                albums[k]["year"] = year
+        album_list = [albums[k] for k in album_order]
+        # "also shown as": the raw variants actually present in the library
+        # (the canonical itself is the headline, so it's excluded).
+        vrows = self.conn.execute(
+            f"SELECT artist, COUNT(*) FROM songs "
+            f"WHERE title != '' AND artist COLLATE NOCASE IN ({ph}) "
+            f"GROUP BY artist COLLATE NOCASE ORDER BY COUNT(*) DESC",
+            variants or [canonical]).fetchall()
+        shown_as = [{"name": r[0], "count": r[1]} for r in vrows
+                    if (r[0] or "").lower() != (canonical or "").lower()]
+        # Mastered / practice presence — over THIS artist's library songs only.
+        mastered = 0
+        has_stats = False
+        fns = [r[0] for r in rows]
+        if fns:
+            fph = ",".join(["?"] * len(fns))
+            srows = self.conn.execute(
+                f"SELECT filename, MAX(best_accuracy) FROM song_stats "
+                f"WHERE filename IN ({fph}) GROUP BY filename", fns).fetchall()
+            has_stats = len(srows) > 0
+            mastered = sum(1 for _fn, acc in srows
+                           if acc is not None and acc >= MASTERY_ACCURACY)
+        # Similar in your library: other artists sharing songs.genre values,
+        # ranked by distinct shared genres then by how many of their songs sit
+        # in those genres. Raw artist rows are folded through the alias map so
+        # "ACDC" and "AC/DC" rank as one artist; self is excluded either way.
+        genres = sorted({(r[4] or "").strip().lower() for r in rows} - {""})
+        similar: list = []
+        if genres:
+            gph = ",".join(["?"] * len(genres))
+            grows = self.conn.execute(
+                f"SELECT artist, COUNT(DISTINCT lower(genre)), COUNT(*) FROM songs "
+                f"WHERE title != '' AND genre != '' AND lower(genre) IN ({gph}) "
+                f"AND artist IS NOT NULL AND artist != '' "
+                f"GROUP BY artist COLLATE NOCASE", genres).fetchall()
+            amap = self.alias_map()
+            agg: dict = {}
+            for raw, shared, n in grows:
+                canon = amap.get((raw or "").lower(), raw)
+                if (canon or "").lower() == (canonical or "").lower():
+                    continue
+                cur = agg.setdefault((canon or "").lower(),
+                                     {"artist": canon, "shared_genres": 0, "count": 0})
+                cur["shared_genres"] = max(cur["shared_genres"], shared)
+                cur["count"] += n
+            similar = sorted(
+                agg.values(),
+                key=lambda a: (-a["shared_genres"], -a["count"], (a["artist"] or "").lower())
+            )[:5]
+        # Header mosaic (locked position 10: MB hosts no artist images — the
+        # default is a mosaic of OWNED album art via the playlist-cover
+        # grammar): one representative song per album first, then fill from
+        # the remaining songs, up to 4.
+        seen: set = set()
+        art_files: list = []
+        for al in album_list:
+            if al["cover"] not in seen:
+                seen.add(al["cover"])
+                art_files.append(al["cover"])
+            if len(art_files) >= 4:
+                break
+        if len(art_files) < 4:
+            for fn in fns:
+                if fn not in seen:
+                    seen.add(fn)
+                    art_files.append(fn)
+                if len(art_files) >= 4:
+                    break
+        return {
+            "artist": canonical,
+            "variants": shown_as,
+            "song_count": len(rows),
+            "album_count": len(album_list),
+            "mastered_count": mastered,
+            "has_stats": has_stats,
+            "albums": album_list,
+            "mb_artist_id": self.artist_known_mb_id(variants),
+            "similar": similar,
+            "art_urls": [f"/api/song/{quote(fn)}/art" for fn in art_files],
+            # Play-all seed (album/track order, same as the rows above).
+            # Bounded so a pathological library can't balloon the payload.
+            "files": fns[:1000],
+        }
+
+    def get_artist_enrichment(self, mb_artist_id: str) -> dict | None:
+        """Cached artist-level enrichment row, JSON fields parsed (bad/legacy
+        JSON degrades to empty rather than 500ing the links route)."""
+        row = self.conn.execute(
+            "SELECT mb_artist_id, url_rels, genres, fetched_at "
+            "FROM artist_enrichment WHERE mb_artist_id = ?",
+            (mb_artist_id,)).fetchone()
+        if not row:
+            return None
+
+        def _parsed(raw, fallback):
+            try:
+                v = json.loads(raw) if raw else fallback
+            except (TypeError, ValueError):
+                return fallback
+            return v if isinstance(v, type(fallback)) else fallback
+
+        return {"mb_artist_id": row[0], "url_rels": _parsed(row[1], {}),
+                "genres": _parsed(row[2], []), "fetched_at": row[3]}
+
+    def put_artist_enrichment(self, mb_artist_id: str, url_rels: dict,
+                              genres: list) -> None:
+        """Store (or refresh) the one artist-level cache row."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO artist_enrichment "
+                "(mb_artist_id, url_rels, genres, fetched_at) "
+                "VALUES (?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))",
+                (mb_artist_id, json.dumps(url_rels or {}), json.dumps(genres or [])))
+            self.conn.commit()
+
     def record_session(self, filename: str, arrangement: int, *, score: int,
                        accuracy: float, last_position=None) -> dict:
         """Record a scored play: plays += 1, best_* = max, last_* = new."""
@@ -2047,7 +2441,13 @@ class MetadataDB:
         cands = [(fn, a) for fn, a in agg.items()
                  if a["plays"] > 0 and a["acc"] is not None and a["acc"] < MASTERY_ACCURACY]
         if not cands:
-            return []
+            # Two different empties (launch polish): attempts exist but
+            # everything attempted is mastered → an empty shelf is honest;
+            # NOTHING attempted yet (day one) → "starter" picks instead, so
+            # the library home invites a first play rather than dead-ending.
+            if any(a["plays"] > 0 and a["acc"] is not None for a in agg.values()):
+                return []
+            return self.starter_suggestions(limit)
         diffs = self.user_meta_map([fn for fn, _ in cands])   # {filename: 1..5}
         out = []
         for fn, a in cands:
@@ -2062,6 +2462,28 @@ class MetadataDB:
             })
         out.sort(key=lambda r: (r["growth_score"], r["last_played_at"] or "", r["filename"]), reverse=True)
         return out[:limit]
+
+    def starter_suggestions(self, limit: int = 8) -> list[dict]:
+        """Day-one 'Start here' picks for a library with no practice attempts
+        yet: up to 8 approachable songs — sensible length (90s–480s, so intros/
+        jingles and 10-minute epics don't lead), shortest first, filename as a
+        stable tiebreak. Same row shape as the growth-edge rows plus a
+        `starter: true` marker so the client renders the invitational 'Start
+        here' shelf instead of 'Keep practicing'. Read-only."""
+        limit = max(1, min(8, int(limit)))
+        rows = self.conn.execute(
+            "SELECT filename FROM songs WHERE title != '' "
+            "AND duration >= 90 AND duration <= 480 "
+            "ORDER BY duration ASC, filename ASC LIMIT ?", (limit,)).fetchall()
+        return [{
+            "filename": r[0],
+            "best_accuracy": None,
+            "arrangement": None,
+            "last_played_at": None,
+            "user_difficulty": None,
+            "growth_score": 0.0,
+            "starter": True,
+        } for r in rows]
 
     # ── Playlists ─────────────────────────────────────────────────────────--
     SAVED_KEY = "saved_for_later"
@@ -2553,8 +2975,8 @@ class MetadataDB:
             self.conn.execute(
                 "INSERT OR REPLACE INTO songs "
                 "(filename, mtime, size, title, artist, album, year, duration, tuning, arrangements, "
-                "has_lyrics, format, stem_count, stem_ids, tuning_name, tuning_sort_key, tuning_offsets, genre) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "has_lyrics, format, stem_count, stem_ids, tuning_name, tuning_sort_key, tuning_offsets, genre, track_number, disc) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (filename, mtime, size, meta.get("title", ""), meta.get("artist", ""),
                  meta.get("album", ""), meta.get("year", ""), meta.get("duration", 0),
                  meta.get("tuning", ""), json.dumps(meta.get("arrangements", [])),
@@ -2565,7 +2987,9 @@ class MetadataDB:
                  meta.get("tuning_name", "") or "",
                  int(meta.get("tuning_sort_key", 0) or 0),
                  meta.get("tuning_offsets", "") or "",
-                 meta.get("genre", "") or ""),
+                 meta.get("genre", "") or "",
+                 meta.get("track_number"),
+                 meta.get("disc")),
             )
             self.conn.commit()
             # A song's identity may have changed → the grouping read-model is stale.
@@ -2617,7 +3041,8 @@ class MetadataDB:
         raw = "|".join([norm(artist), norm(title), norm(album), dur])
         return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
-    def enrichment_pending(self, limit: int = 500) -> list[dict]:
+    def enrichment_pending(self, limit: int = 500,
+                           allowed_keys: frozenset | None = None) -> list[dict]:
         """Songs whose enrichment row needs (re)matching: no row yet, or a
         row whose content_hash no longer matches the song's current metadata
         (an edit changed the identity → re-match), or an `unscanned` row.
@@ -2627,24 +3052,37 @@ class MetadataDB:
         retries only via the matcher's backoff policy (enrichment_failed_rows)
         rather than being re-queued every pass. An identity edit (say, the
         user fixes the typo that made matching fail) re-queues any of them
-        immediately via the hash mismatch."""
+        immediately via the hash mismatch.
+
+        `allowed_keys` is the set of per-field auto-apply toggle keys that are
+        currently ON. A `matched` row stamped while one of those fields was
+        suppressed (its key in `apply_mask`) is re-queued for backfill, so
+        re-enabling a field honours the same "nothing forfeited" contract the
+        source/art toggles already keep. None = don't apply the mask rule (the
+        caller isn't the field-aware matcher, e.g. a plain count)."""
         # Read under _lock: the worker commits on this shared connection under
         # _lock, so an unlocked SELECT could interleave with its execute+commit.
         with self._lock:
             rows = self.conn.execute(
                 "SELECT s.filename, s.artist, s.title, s.album, s.year, s.duration, "
-                "e.content_hash, e.match_state "
+                "e.content_hash, e.match_state, e.apply_mask "
                 "FROM songs s LEFT JOIN song_enrichment e ON e.filename = s.filename "
                 "WHERE s.title != '' AND (e.filename IS NULL "
                 "OR e.match_state IN ('unscanned', 'matched', 'review', 'failed')) "
                 "ORDER BY s.filename LIMIT ?", (max(1, int(limit)),)).fetchall()
         out = []
-        for fn, artist, title, album, year, duration, ehash, state in rows:
+        for fn, artist, title, album, year, duration, ehash, state, mask in rows:
             h = self.enrichment_content_hash(artist, title, album, duration)
             # No row yet, still unmatched, or the identity changed under a
             # settled row → needs the matcher. A settled row with an
-            # unchanged hash stays settled (idempotence).
-            if state is None or state == "unscanned" or ehash != h:
+            # unchanged hash stays settled (idempotence)…
+            needs = state is None or state == "unscanned" or ehash != h
+            # …EXCEPT a `matched` row that suppressed a field now re-enabled:
+            # re-queue it so the newly-allowed field gets backfilled.
+            if not needs and state == "matched" and allowed_keys is not None and mask:
+                if {k for k in mask.split(",") if k} & allowed_keys:
+                    needs = True
+            if needs:
                 out.append({"filename": fn, "artist": artist, "title": title,
                             "album": album, "year": year, "duration": duration,
                             "content_hash": h, "match_state": state})
@@ -2699,7 +3137,8 @@ class MetadataDB:
                 "SELECT filename, content_hash, match_state, match_source, match_score, attempts, "
                 "mb_recording_id, mb_release_id, mb_artist_id, isrc, "
                 "canon_artist, canon_album, canon_title, canon_year, canon_artist_sort, "
-                "genres, art_cache_path, art_state, fetched_at, candidates, last_attempt_at "
+                "genres, art_cache_path, art_state, fetched_at, candidates, last_attempt_at, "
+                "apply_mask "
                 "FROM song_enrichment WHERE filename = ?", (filename,)).fetchone()
         if not row:
             return None
@@ -2707,7 +3146,7 @@ class MetadataDB:
                 "attempts", "mb_recording_id", "mb_release_id", "mb_artist_id", "isrc",
                 "canon_artist", "canon_album", "canon_title", "canon_year",
                 "canon_artist_sort", "genres", "art_cache_path", "art_state", "fetched_at",
-                "candidates", "last_attempt_at")
+                "candidates", "last_attempt_at", "apply_mask")
         out = dict(zip(keys, row))
         for k in ("genres", "candidates"):
             try:
@@ -2725,6 +3164,42 @@ class MetadataDB:
                 "SELECT e.match_state, COUNT(*) FROM song_enrichment e "
                 "JOIN songs s ON s.filename = e.filename GROUP BY e.match_state").fetchall()
         return {r[0]: r[1] for r in rows}
+
+    def enrichment_states_for(self, filenames: list[str]) -> dict:
+        """{filename: match_state} for the given songs — a never-enriched (or
+        unknown) filename is simply absent from the result. Powers the per-tile
+        badges on the "Refresh Metadata" batch: the grid polls only the
+        filenames in its visible window, not the whole library, so a card can
+        animate queued→working→result without a per-song round-trip."""
+        if not filenames:
+            return {}
+        out: dict = {}
+        with self._lock:
+            # Chunk under SQLite's variable limit so a huge visible window (or a
+            # hostile caller) can't overflow the single IN (...) parameter list.
+            for i in range(0, len(filenames), 400):
+                chunk = filenames[i:i + 400]
+                q = ("SELECT filename, match_state FROM song_enrichment "
+                     "WHERE filename IN (%s)" % ",".join("?" * len(chunk)))
+                for fn, st in self.conn.execute(q, chunk).fetchall():
+                    out[fn] = st
+        return out
+
+    def _unmatched_set(self, filenames) -> set:
+        """The subset of `filenames` whose enrichment landed in the 'failed'
+        (no-match) state — feeds the grid's persistent per-card "no match" badge,
+        so the misses stay visible at rest (the batch tile only shows while a
+        refresh runs). Chunked set membership, like favorite_set."""
+        fns = list(filenames)
+        out: set = set()
+        for i in range(0, len(fns), 400):
+            chunk = fns[i:i + 400]
+            if not chunk:
+                break
+            q = ("SELECT filename FROM song_enrichment WHERE match_state = 'failed' "
+                 "AND filename IN (%s)" % ",".join("?" * len(chunk)))
+            out.update(r[0] for r in self.conn.execute(q, chunk).fetchall())
+        return out
 
     def enrichment_song_row(self, filename: str) -> dict | None:
         """The identity fields the matcher/scorer keys on, for one song."""
@@ -2759,12 +3234,17 @@ class MetadataDB:
     def enrichment_cache_lookup(self, content_hash: str, exclude_filename: str = "") -> dict | None:
         """A settled match for the same identity hash — another chart of the
         same recording already matched/pinned → copy it, no network (design
-        §5 step 1: the local match-cache)."""
+        §5 step 1: the local match-cache). Only FULLY-applied donors qualify
+        (apply_mask empty/NULL): a row that suppressed a display field under an
+        auto-apply toggle would otherwise seed siblings with its blanks even
+        when the reader's own toggles want that field — so a partial row is
+        skipped and the sibling falls through to its own (re-filtered) match."""
         row = self.conn.execute(
             "SELECT match_score, mb_recording_id, mb_release_id, mb_artist_id, isrc, "
             "canon_artist, canon_album, canon_title, canon_year, canon_artist_sort, genres "
             "FROM song_enrichment WHERE content_hash = ? AND filename != ? "
             "AND match_state IN ('matched', 'manual') AND mb_recording_id IS NOT NULL "
+            "AND COALESCE(apply_mask, '') = '' "
             "LIMIT 1", (content_hash, exclude_filename or "")).fetchone()
         if not row:
             return None
@@ -2784,7 +3264,8 @@ class MetadataDB:
                                source: str | None = None, score: float | None = None,
                                cand: dict | None = None, candidates: list | None = None,
                                bump_attempts: bool = False,
-                               allow_manual_overwrite: bool = False) -> bool:
+                               allow_manual_overwrite: bool = False,
+                               apply_mask: str | None = None) -> bool:
         """The single writer for every matcher/review outcome. Writes the
         full lifecycle row: state + source + score, the canonical fields a
         confident match supplies (`cand`), and/or the review tier's ranked
@@ -2792,7 +3273,11 @@ class MetadataDB:
         `manual` and the caller isn't explicitly acting for the user — the
         never-overwrite-manual contract lives HERE so no future call path
         can forget it. Art-cache fields are preserved verbatim (they belong
-        to the art slice, not the matcher)."""
+        to the art slice, not the matcher). `apply_mask` (blocked per-field
+        keys, from the matcher) is stamped verbatim so enrichment_pending /
+        enrichment_cache_lookup can tell a fully-applied match from a
+        field-suppressed one; the review/manual writers leave it NULL (a
+        confirmed pick applies in full)."""
         cand = cand or {}
         now = time.time()
         with self._lock:
@@ -2801,7 +3286,10 @@ class MetadataDB:
                 "FROM song_enrichment WHERE filename = ?", (filename,)).fetchone()
             if cur and cur[0] == "manual" and not allow_manual_overwrite:
                 return False
-            attempts = int(cur[1] or 0) if cur else 0
+            # An explicit reset to `unscanned` (Refresh metadata) is a fresh
+            # start — the failure backoff restarts with the identity, same as
+            # the stub upsert's hash-change rule.
+            attempts = 0 if state == "unscanned" else (int(cur[1] or 0) if cur else 0)
             if bump_attempts:
                 attempts += 1
             fetched_at = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -2812,8 +3300,9 @@ class MetadataDB:
                 "match_state, match_source, match_score, attempts, "
                 "mb_recording_id, mb_release_id, mb_artist_id, isrc, "
                 "canon_artist, canon_album, canon_title, canon_year, canon_artist_sort, "
-                "genres, art_cache_path, art_state, fetched_at, candidates, last_attempt_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "genres, art_cache_path, art_state, fetched_at, candidates, last_attempt_at, "
+                "apply_mask) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (filename, content_hash, state, source, score, attempts,
                  cand.get("recording_id") or None, cand.get("release_id") or None,
                  cand.get("artist_id") or None, cand.get("isrc") or None,
@@ -2824,7 +3313,8 @@ class MetadataDB:
                  cur[2] if cur else None, cur[3] if cur else None,
                  fetched_at,
                  json.dumps(candidates) if candidates else None,
-                 now if state == "failed" else None))
+                 now if state == "failed" else None,
+                 apply_mask or None))
             self.conn.commit()
         return True
 
@@ -2854,19 +3344,26 @@ class MetadataDB:
             filename, row["content_hash"], "failed", source="rejected",
             score=None, candidates=row.get("candidates") or None)
 
-    def enrichment_review_queue(self, limit: int = 200) -> list[dict]:
+    def enrichment_review_queue(self, limit: int = 200,
+                                order: str = "missing_first") -> list[dict]:
         """The Match-Review drawer's queue: review-tier rows joined to their
-        (still-existing) songs, with the stored candidate list parsed."""
+        (still-existing) songs, with the stored candidate list parsed.
+        `order` is the user's review-queue preference: 'missing_first'
+        (default — charts missing album/year surface first, they gain the
+        most from a confirm; complete charts only stand to be re-labelled),
+        'artist' (A–Z), or 'recent' (newest files first). Unknown values
+        fall back to missing_first."""
+        order_sql = {
+            "artist": "s.artist COLLATE NOCASE, s.title COLLATE NOCASE, e.filename",
+            "recent": "s.mtime DESC, e.filename",
+        }.get(order, "((COALESCE(s.album, '') = '') + (COALESCE(s.year, '') = '')) DESC, "
+                     "s.artist COLLATE NOCASE, s.title COLLATE NOCASE, e.filename")
         rows = self.conn.execute(
             "SELECT e.filename, s.title, s.artist, s.album, s.year, s.duration, s.mtime, "
             "e.match_score, e.candidates, e.attempts "
             "FROM song_enrichment e JOIN songs s ON s.filename = e.filename "
             "WHERE e.match_state = 'review' "
-            # Charts that are MISSING data (no album / no year) surface first —
-            # confirming those has the most to gain; complete charts only
-            # stand to be re-labelled.
-            "ORDER BY ((COALESCE(s.album, '') = '') + (COALESCE(s.year, '') = '')) DESC, "
-            "s.artist COLLATE NOCASE, s.title COLLATE NOCASE, e.filename "
+            "ORDER BY " + order_sql + " "
             "LIMIT ?", (max(1, int(limit)),)).fetchall()
         out = []
         for fn, title, artist, album, year, duration, mtime, score, cands, attempts in rows:
@@ -2879,6 +3376,41 @@ class MetadataDB:
                         "mtime": mtime, "match_score": score,
                         "candidates": candidates, "attempts": attempts or 0})
         return out
+
+    def enrichment_art_pending(self, limit: int = 500) -> list[dict]:
+        """Matched songs whose cover-art situation hasn't been evaluated yet
+        (art_state NULL). The art worker resolves each to 'pack' (song has its
+        own art), 'user' (an override exists), 'caa' (fetched), 'none' (the
+        release has no cover) or 'error' — any of which settles the row, so
+        this never re-offers a song each pass."""
+        rows = self.conn.execute(
+            "SELECT e.filename, e.mb_release_id "
+            "FROM song_enrichment e JOIN songs s ON s.filename = e.filename "
+            "WHERE e.match_state IN ('matched', 'manual') "
+            "AND e.mb_release_id IS NOT NULL AND e.art_state IS NULL "
+            "ORDER BY e.filename LIMIT ?", (max(1, int(limit)),)).fetchall()
+        return [{"filename": r[0], "mb_release_id": r[1]} for r in rows]
+
+    def set_enrichment_art(self, filename: str, path: str | None, state: str | None) -> None:
+        """Stamp a row's art-cache outcome. Targeted UPDATE (not the match
+        writer) so it can never disturb the match lifecycle fields."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE song_enrichment SET art_cache_path = ?, art_state = ? "
+                "WHERE filename = ?", (path, state, filename))
+            self.conn.commit()
+
+    def clear_enrichment_art_paths(self, paths: list[str]) -> None:
+        """Reset rows whose cached art file was evicted (LRU prune) back to
+        unevaluated, so a later pass may re-fetch if the song still qualifies."""
+        if not paths:
+            return
+        with self._lock:
+            ph = ",".join("?" * len(paths))
+            self.conn.execute(
+                f"UPDATE song_enrichment SET art_cache_path = NULL, art_state = NULL "
+                f"WHERE art_cache_path IN ({ph})", paths)
+            self.conn.commit()
 
     def _estd_set(self) -> set[str]:
         """Get set of filenames that have a retuned variant (_EStd_ or _DropD_) in the DB."""
@@ -2969,7 +3501,7 @@ class MetadataDB:
         # list on scan). OR within the selected set.
         if genre:
             _gph = ",".join(["?"] * len(genre))
-            where += f" AND genre COLLATE NOCASE IN ({_gph})"
+            where += f" AND ({self._effective_genre_expr()}) COLLATE NOCASE IN ({_gph})"
             params += list(genre)
         # Mastery bands = best accuracy across a song's arrangements (song_stats,
         # a separate table -> correlated subquery). mastered >= 0.9, in_progress =
@@ -3023,8 +3555,21 @@ class MetadataDB:
             if _msel:
                 where += " AND (" + " OR ".join(_msel) + ")"
         if q:
-            where += " AND (title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE OR album LIKE ? COLLATE NOCASE)"
-            params += [f"%{q}%"] * 3
+            _qlike = f"%{q}%"
+            _qterms = ("title LIKE ? COLLATE NOCASE OR artist LIKE ? COLLATE NOCASE "
+                       "OR album LIKE ? COLLATE NOCASE")
+            _qparams = [_qlike] * 3
+            # Alias-aware artist term (launch polish): searching the CANONICAL
+            # name ("AC/DC") must also find songs whose raw tag is a merged
+            # variant ("ACDC") — expand via the artist_alias table. Pure
+            # predicate (keyset-safe); probe-guarded so the common no-aliases
+            # library keeps the exact original 3-term query.
+            if self.conn.execute("SELECT 1 FROM artist_alias LIMIT 1").fetchone() is not None:
+                _qterms += (" OR artist COLLATE NOCASE IN (SELECT raw_name FROM artist_alias "
+                            "WHERE canonical_name LIKE ? COLLATE NOCASE)")
+                _qparams.append(_qlike)
+            where += f" AND ({_qterms})"
+            params += _qparams
         if include_intrinsic:
             ifrag, iparams = self._build_intrinsic_where(
                 "songs", format_filter=format_filter,
@@ -3501,7 +4046,13 @@ class MetadataDB:
             where += self._GROUP_REP_PREDICATE
 
         sort_map = {
-            "artist": "artist COLLATE NOCASE", "artist-desc": "artist COLLATE NOCASE DESC",
+            # Artist sorts order WITHIN an artist by title (the tree view's
+            # artist -> album -> title feel) instead of raw filename — the
+            # "list is organised, cards look random" report. Direction is
+            # baked per entry (the legacy `dir=desc` append would otherwise
+            # land on the title term); title stays ascending under Z->A.
+            "artist": "artist COLLATE NOCASE ASC, title COLLATE NOCASE ASC",
+            "artist-desc": "artist COLLATE NOCASE DESC, title COLLATE NOCASE ASC",
             "title": "title COLLATE NOCASE", "title-desc": "title COLLATE NOCASE DESC",
             "recent": "mtime DESC",
             # Tuning sort uses musical distance from E Standard
@@ -3538,6 +4089,10 @@ class MetadataDB:
             # '2005' rather than alphabetic.
             "year": "(year = '') ASC, CAST(year AS INTEGER) ASC",
             "year-desc": "(year = '') ASC, CAST(year AS INTEGER) DESC",
+            # Album track order: authored track number (disc, then track); songs
+            # with no number fall to the bottom, ordered by title. Used by the
+            # album detail view. Alpha-by-title is the fallback when unauthored.
+            "track": "(track_number IS NULL) ASC, COALESCE(disc, 1), track_number, title COLLATE NOCASE",
             # Mastery = best accuracy across a song's arrangements, from the
             # separate song_stats table (so via a correlated subquery — this sort
             # drops to OFFSET paging, like tuning/year). Unscored ("not started")
@@ -3569,14 +4124,23 @@ class MetadataDB:
                    "FROM work_display w1 WHERE w1.filename = songs.filename))")
             sort_map["mastery"] = f"({_gm} IS NULL) ASC, {_gm} ASC"
             sort_map["mastery-desc"] = f"({_gm} IS NULL) ASC, {_gm} DESC"
-        order = sort_map.get(sort, "artist COLLATE NOCASE")
+        # Fold the legacy `dir=desc` toggle into the canonical sort key BEFORE
+        # the lookup, so the ORDER BY is built from the effective sort — mirrors
+        # what `_effective_keyset_sort` does on the cursor side. Needed because
+        # the artist clause now bakes in `ASC` (for the title secondary), so the
+        # ` DESC` append below is suppressed and would otherwise silently ignore
+        # `sort=artist&dir=desc` (return A→Z). Only artist/title fold (they have
+        # `-desc` twins); tuning/year/mastery keep their own dir handling.
+        eff = _effective_keyset_sort(sort, direction)
+        order = sort_map.get(eff, "artist COLLATE NOCASE")
         # Legacy `dir=desc` toggle: only safe to append on simple sort
         # clauses that don't already encode a direction. Compound /
-        # multi-term entries above (tuning, year, year-desc) bake their
+        # multi-term entries above (artist, tuning, year, year-desc) bake their
         # ASC/DESC into the clause, so a global ` DESC` append would
         # produce invalid SQL like `CAST(year AS INTEGER) ASC DESC`.
         # Skip the append in that case — clients flipping direction on
-        # those sorts use the explicit `-desc` sort key instead.
+        # those sorts use the explicit `-desc` sort key instead. (For
+        # artist/title the fold above already picked the `-desc` clause.)
         if direction == "desc" and " ASC" not in order and " DESC" not in order:
             order += " DESC"
         # Unique, deterministic tiebreak → a TOTAL order. Without it, rows with
@@ -3641,6 +4205,20 @@ class MetadataDB:
         fns = [s["filename"] for s in songs]
         udm = self.user_meta_map(fns)
         tgm = self.tags_map(fns)
+        # Enrichment "no match" (failed) set for the page, so a card can show a
+        # persistent "no match" badge — the Refresh-Metadata batch's transient
+        # per-tile state only paints while a pass runs. Cheap set membership like
+        # favs/estd, so the misses stay visible at rest.
+        um = self._unmatched_set(fns)
+        # Per-song display OVERRIDES (Fix-metadata popup, slice 3). "Grid shows
+        # only overrides": the effective cell is the user's override else the
+        # pack value — a matched MusicBrainz canon NEVER silently re-titles a
+        # card (canon lives in the Details drawer + art). Overlaid in Python
+        # over the visible window, keyset-safe exactly like the P4 alias re-label
+        # below: the seek still runs on the raw column (the one overridable
+        # keyset column, title, stashes its raw value for the cursor — see
+        # _sort_title / next_library_cursor).
+        omap = self.overrides_map(fns)
         # Canonical artist at display (P4): re-label the card's artist through the
         # alias override so "ACDC" reads as "AC/DC". Display-only — the row's sort
         # position (raw artist) is untouched, so a card can show a canonical name
@@ -3650,8 +4228,32 @@ class MetadataDB:
         for s in songs:
             s["user_difficulty"] = udm.get(s["filename"])
             s["tags"] = tgm.get(s["filename"], [])
+            s["unmatched"] = s["filename"] in um
             if amap:
                 s["artist"] = amap.get((s.get("artist") or "").lower(), s.get("artist"))
+            # English-base romaji fallback: a blank-artist CDLC pack shows nothing
+            # useful (artist blank; title = the raw filename). Surface the author's
+            # romaji from the "Artist_Title_v1_p" filename so the card reads
+            # "Junko Yagami — BAY CITY", never blank or native script. Display-only;
+            # a user override (below) still wins. Keyset-safe: stash the raw title
+            # for the cursor before replacing it.
+            if not (s.get("artist") or "").strip():
+                r_artist, r_title = self._romaji_display(s["filename"], s.get("artist"), s.get("title"))
+                if r_title != s.get("title") and "_sort_title" not in s:
+                    s["_sort_title"] = s["title"]
+                s["artist"], s["title"] = r_artist, r_title
+            # Override wins over the pack AND the alias re-label — it's the user's
+            # explicit per-song choice. Only a non-empty override VALUE replaces a
+            # cell; a lock-only row (value None) leaves the displayed value alone.
+            ov = omap.get(s["filename"])
+            if ov:
+                for field in ("title", "artist", "album", "year"):
+                    cell = ov.get(field)
+                    val = cell.get("value") if cell else None
+                    if val:
+                        if field == "title" and "_sort_title" not in s:
+                            s["_sort_title"] = s["title"]   # raw title, for the keyset cursor
+                        s[field] = val
         # Grouped rows carry the ⚑ N (chart_count) + the work_key from the
         # materialized read-model, so the card can render the "N charts" chip and
         # address the Charts drawer (GET /api/work/{work_key}/charts) without a
@@ -3817,6 +4419,7 @@ class MetadataDB:
                      arrangements_has=None, arrangements_lacks=None,
                      stems_has=None, stems_lacks=None,
                      has_lyrics=None, tunings=None, mastery=None,
+                     match_states=None, genre=None,
                      naming_mode="legacy", page=0, size=120):
         """Distinct (artist, album) groups with a track count + a representative
         cover song, for the album-condensed browse (paged by album). Rows with no
@@ -3828,6 +4431,7 @@ class MetadataDB:
             arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
             stems_has=stems_has, stems_lacks=stems_lacks,
             has_lyrics=has_lyrics, tunings=tunings, mastery=mastery,
+            match_states=match_states, genre=genre,
             naming_mode=naming_mode,
         )
         awhere = where + " AND album IS NOT NULL AND album != ''"
@@ -4859,10 +5463,52 @@ def _resolve_dlc_path(dlc: Path, filename: str) -> Path | None:
     check so every filename-bound handler validates before touching the
     filesystem.
 
-    Returns the validated resolved Path, or None if the path is empty
-    or escapes the DLC root.
+    Containment here is LEXICAL (normalize `.`/`..` WITHOUT following
+    symlinks), not `safe_join`'s `.resolve()`-based check — because users
+    commonly mount their song library through a directory JUNCTION/symlink
+    (a library shared across app installs; the desktop app's own mounts).
+    `.resolve()` follows that junction to its real target, sees it sits
+    outside DLC_DIR, and wrongly rejects every song reached through it — the
+    scanner's `rglob` indexes those songs, but art/load then 403/404s (broken
+    covers, unplayable songs). Lexical normalization still rejects the only
+    escapes a `:path` filename can express — `..` traversal and absolute
+    paths — which the traversal tests pin. `safe_join` stays strict (it is
+    the zip-slip / plugin-asset guard, where following a symlink out IS the
+    defense); the loose-folder art handler keeps its own per-file symlink
+    re-check for defence-in-depth.
+
+    Returns the validated Path (not necessarily link-resolved), or None if
+    the filename is empty, contains a NUL, or escapes the DLC root.
     """
-    return safe_join(dlc, filename)
+    if not filename:
+        return None
+    # Backslashes → forward slashes so a Windows-style `..\\x` traversal is
+    # rejected identically on POSIX (mirrors safe_join's normalisation).
+    safe = filename.replace("\\", "/")
+    if "\x00" in safe:
+        return None
+    # Reject drive-letter / absolute paths in BOTH conventions. A POSIX "/x" is
+    # caught by the containment check below (the `/` operator discards `root`),
+    # but a Windows drive-absolute "C:/x" is treated as a relative "C:" dir on
+    # POSIX and would otherwise slip in as `<root>/C:/x` — so the contract must
+    # hold cross-platform (a shared library is reached from either OS).
+    from pathlib import PurePosixPath, PureWindowsPath
+    if (PurePosixPath(safe).is_absolute()
+            or PureWindowsPath(safe).is_absolute()
+            or PureWindowsPath(safe).drive):
+        return None
+    try:
+        root = dlc.resolve()
+        # normpath collapses `.`/`..`/duplicate separators purely lexically —
+        # it never touches the filesystem, so an in-library junction component
+        # is preserved (allowed) while `..`/absolute segments still escape and
+        # get caught by the containment check below.
+        candidate = Path(os.path.normpath(root / safe))
+        if not candidate.is_relative_to(root):
+            return None
+    except (ValueError, OSError):
+        return None
+    return candidate
 
 
 _SMART_TYPE_BASE: dict[str, int] = {"Lead": 0, "Rhythm": 10, "Bass": 20}
@@ -5207,13 +5853,217 @@ def _get_progression_content() -> dict:
     return _progression_content
 
 
+def _copy_builtin_packs(
+    root: Path,
+    dest_dir: Path,
+    sources: list[tuple[str, str]],
+    label: str,
+    update_existing: bool = True,
+) -> int:
+    """Symlink-safe, mtime-aware copy of bundled packs into ``dest_dir``.
+
+    ``sources`` is a list of ``(dest_name, rel_source)`` pairs; each source is
+    resolved under ``root`` (the repo root in dev, ``resources/feedBack`` when
+    bundled). A pack is copied when its destination is missing. Never deletes
+    user files; refuses to follow a symlinked seed directory or destination and
+    refuses to clobber a non-regular destination (any would let a copy escape
+    ``dest_dir`` or destroy user data). Logs and continues on error. ``label``
+    prefixes every log line.
+
+    ``update_existing`` controls what happens when a *regular* destination file
+    already exists: when True (diagnostic seed) a bundle copy newer than the
+    destination refreshes it; when False (one-time starter content) an existing
+    file is always left as-is so the user's copy is never overwritten.
+
+    Returns the number of ``sources`` that are present at their destination
+    afterwards (freshly seeded, refreshed, or already current) — so callers can
+    tell whether every pack made it. A skip (missing source, symlink/non-regular
+    refusal, copy error) does not count.
+    """
+    # Refuse a symlinked seed directory: mkdir(exist_ok=True) would accept it
+    # and copies would land at the link target, outside the DLC tree. The
+    # per-file symlink guard below cannot catch this.
+    if dest_dir.is_symlink():
+        log.warning("%s: %s is a symlink, skipping all seeding", label, dest_dir.name)
+        return 0
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pin the seed directory by an O_NOFOLLOW fd so a symlink swapped in for
+    # dest_dir *after* the check above cannot redirect the per-file stat /
+    # temp-create / replace outside the DLC tree (parent-directory TOCTOU).
+    # os.replace accepts dir_fd on POSIX even though it isn't listed in
+    # os.supports_dir_fd, so gate on os.rename (the reliable proxy); platforms
+    # without dir_fd/O_NOFOLLOW (e.g. Windows) fall back to path-based ops.
+    dir_fd = None
+    if (
+        hasattr(os, "O_NOFOLLOW")
+        and hasattr(os, "O_DIRECTORY")
+        and os.open in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+    ):
+        try:
+            dir_fd = os.open(dest_dir, os.O_RDONLY | os.O_NOFOLLOW | os.O_DIRECTORY)
+        except OSError as exc:
+            log.warning("%s: cannot open seed dir %s: %s", label, dest_dir, exc)
+            return 0
+
+    try:
+        present = 0
+        for dest_name, rel_source in sources:
+            source = root / rel_source
+            if not source.is_file():
+                log.warning("%s: source missing, skipping %s (%s)", label, dest_name, source)
+                continue
+
+            # lstat the destination without following symlinks. Pinned by dir_fd
+            # this resolves within the real seed dir, immune to a parent swap.
+            try:
+                if dir_fd is not None:
+                    dstat = os.lstat(dest_name, dir_fd=dir_fd)
+                else:
+                    dstat = os.lstat(dest_dir / dest_name)
+                dest_exists = True
+                dest_islink = stat.S_ISLNK(dstat.st_mode)
+            except FileNotFoundError:
+                dest_exists = False
+                dest_islink = False
+            except OSError as exc:
+                log.warning("%s: cannot stat %s: %s", label, dest_name, exc)
+                continue
+
+            # Refuse to seed through a symlink at the destination name.
+            if dest_islink:
+                log.warning("%s: destination is a symlink, skipping %s", label, dest_name)
+                continue
+
+            # A non-regular destination (directory, fifo, …) the user placed
+            # there: never clobber it, and never count it as present — otherwise
+            # a one-time seed would mark itself done without a real pack on disk.
+            if dest_exists and not stat.S_ISREG(dstat.st_mode):
+                log.warning("%s: destination is not a regular file, skipping %s", label, dest_name)
+                continue
+
+            if dest_exists:
+                # A regular file is already there. One-time seeds (starter
+                # content) must never overwrite the user's copy; refreshing
+                # seeds (diagnostics) replace it only when the bundle is newer.
+                if not update_existing:
+                    log.info("%s: already present %s", label, dest_name)
+                    present += 1
+                    continue
+                try:
+                    src_mtime = source.stat().st_mtime
+                except OSError as exc:
+                    log.warning("%s: cannot stat source %s: %s", label, source, exc)
+                    continue
+                if src_mtime <= dstat.st_mtime:
+                    log.info("%s: already present %s", label, dest_name)
+                    present += 1
+                    continue
+                action = "updated"
+            else:
+                action = "seeded"
+
+            if _write_builtin_pack(source, dest_dir, dest_name, dir_fd):
+                present += 1
+                log.info("%s: %s %s -> %s", label, action, source.name, dest_name)
+            else:
+                log.warning("%s: failed to copy %s -> %s/%s", label, source, dest_dir.name, dest_name)
+
+        return present
+    finally:
+        if dir_fd is not None:
+            os.close(dir_fd)
+
+
+def _write_builtin_pack(
+    source: Path,
+    dest_dir: Path,
+    dest_name: str,
+    dir_fd: int | None,
+) -> bool:
+    """Atomically write ``source`` to ``dest_name`` inside ``dest_dir``.
+
+    Writes to a temp file then ``os.replace()``s onto the final name so a
+    symlink raced in at the destination is overwritten (rename semantics), not
+    followed, and a crash never leaves a half-written pack. When ``dir_fd`` is
+    given, every step is anchored to that fd (O_NOFOLLOW temp create + dir_fd
+    replace), closing the parent-directory TOCTOU; otherwise falls back to
+    path-based temp+replace. Returns True on success. Never raises.
+    """
+    # Unique per-attempt name (O_EXCL create) so a crash that orphans a temp
+    # can't permanently block later seeds via an EEXIST collision.
+    tmp_name = f".seed-{dest_name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    try:
+        src_stat = source.stat()
+    except OSError as exc:
+        log.debug("builtin pack: cannot stat source %s: %s", source, exc)
+        return False
+    if dir_fd is not None:
+        tmp_fd = None
+        try:
+            tmp_fd = os.open(
+                tmp_name,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o644,
+                dir_fd=dir_fd,
+            )
+            with open(source, "rb") as sf, os.fdopen(tmp_fd, "wb") as tf:
+                tmp_fd = None  # fdopen now owns the descriptor
+                shutil.copyfileobj(sf, tf)
+            os.replace(tmp_name, dest_name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            # Preserve the bundle mtime (copyfileobj doesn't) so the mtime-based
+            # refresh check matches the shutil.copy2 fallback path. Best-effort.
+            try:
+                os.utime(
+                    dest_name,
+                    ns=(src_stat.st_atime_ns, src_stat.st_mtime_ns),
+                    dir_fd=dir_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                log.debug("builtin pack: could not set mtime on %s: %s", dest_name, exc)
+            return True
+        except OSError as exc:
+            log.debug("builtin pack write (dir_fd) failed for %s: %s", dest_name, exc)
+            if tmp_fd is not None:
+                try:
+                    os.close(tmp_fd)
+                except OSError:
+                    pass
+            try:
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except OSError:
+                pass
+            return False
+
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=dest_dir, prefix=".seed-", suffix=".tmp")
+        os.close(fd)
+        shutil.copy2(source, tmp)
+        os.replace(tmp, dest_dir / dest_name)
+        tmp = None
+        return True
+    except OSError as exc:
+        log.debug("builtin pack write failed for %s: %s", dest_name, exc)
+        return False
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 def _seed_builtin_diagnostic_sloppaks(dlc: Path | None = None) -> None:
     """Copy bundled diagnostic sloppaks into DLC before library scan.
 
     Creates ``DLC_DIR/diagnostics-builtin/`` and copies each bundled sloppak
     when the destination is missing or older than the repo/bundle source.
     Never deletes user files or touches manually copied paths (e.g.
-    ``diagnostics-test/``). Logs and continues on missing source or copy errors.
+    ``diagnostics-test/``). Re-seeds whenever the destination is missing so the
+    diagnostic target is always available. Logs and continues on errors.
     """
     try:
         if dlc is None:
@@ -5221,84 +6071,106 @@ def _seed_builtin_diagnostic_sloppaks(dlc: Path | None = None) -> None:
         if dlc is None:
             log.debug("Builtin diagnostic seed: no DLC folder configured, skipping")
             return
-
-        root = _feedBack_server_root()
-        dest_dir = dlc / _BUILTIN_DIAGNOSTIC_SUBDIR
-        # Refuse a symlinked seed directory: mkdir(exist_ok=True) would accept
-        # it and copies would land at the link target, outside the DLC tree.
-        # The per-file is_symlink() guard below cannot catch this.
-        if dest_dir.is_symlink():
-            log.warning(
-                "Builtin diagnostic seed: %s is a symlink, skipping all seeding",
-                _BUILTIN_DIAGNOSTIC_SUBDIR,
-            )
-            return
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        for dest_name, rel_source in _BUILTIN_DIAGNOSTIC_SOURCES:
-            source = root / rel_source
-            dest = dest_dir / dest_name
-
-            if not source.is_file():
-                log.warning(
-                    "Builtin diagnostic seed: source missing, skipping %s (%s)",
-                    dest_name,
-                    source,
-                )
-                continue
-
-            # Refuse to seed through a symlink. is_file()/stat()/copy2 all
-            # follow links, so a symlink planted at the destination would let
-            # the copy redirect outside diagnostics-builtin/ and overwrite an
-            # arbitrary file the server user can write. Skip and warn; never
-            # touch the link or its target.
-            if dest.is_symlink():
-                log.warning(
-                    "Builtin diagnostic seed: destination is a symlink, skipping %s/%s",
-                    _BUILTIN_DIAGNOSTIC_SUBDIR,
-                    dest_name,
-                )
-                continue
-
-            if dest.is_file():
-                try:
-                    if source.stat().st_mtime <= dest.stat().st_mtime:
-                        log.info(
-                            "Builtin diagnostic seed: already present %s/%s",
-                            _BUILTIN_DIAGNOSTIC_SUBDIR,
-                            dest_name,
-                        )
-                        continue
-                    action = "updated"
-                except OSError as exc:
-                    log.warning(
-                        "Builtin diagnostic seed: cannot compare %s and %s: %s",
-                        source,
-                        dest,
-                        exc,
-                    )
-                    continue
-            else:
-                action = "seeded"
-
-            try:
-                shutil.copy2(source, dest)
-                log.info(
-                    "Builtin diagnostic seed: %s %s -> %s/%s",
-                    action,
-                    source.name,
-                    _BUILTIN_DIAGNOSTIC_SUBDIR,
-                    dest_name,
-                )
-            except OSError as exc:
-                log.warning(
-                    "Builtin diagnostic seed: failed to copy %s -> %s: %s",
-                    source,
-                    dest,
-                    exc,
-                )
+        _copy_builtin_packs(
+            _feedBack_server_root(),
+            dlc / _BUILTIN_DIAGNOSTIC_SUBDIR,
+            _BUILTIN_DIAGNOSTIC_SOURCES,
+            "Builtin diagnostic seed",
+        )
     except Exception:
         log.warning("Builtin diagnostic seed: unexpected error", exc_info=True)
+
+
+# Starter content: bundled songs copied into ``DLC_DIR/starter/`` exactly ONCE,
+# on first run, as a welcome library so a fresh install isn't empty. Unlike the
+# diagnostic seed this is one-time — guarded by a marker in CONFIG_DIR — so if
+# the user deletes the starter song it stays gone. ``starter/`` is NOT in the
+# library scan carve-out (unlike diagnostics-builtin/ / tutorials-builtin/), so
+# seeded packs surface as ordinary library songs.
+_BUILTIN_STARTER_SUBDIR = "starter"
+_BUILTIN_STARTER_SOURCES: list[tuple[str, str]] = [
+    (
+        "beethoven-fur_elise.feedpak",
+        "content/starter/beethoven-fur_elise.feedpak",
+    ),
+    (
+        "star_spangled_banner.feedpak",
+        "content/starter/star_spangled_banner.feedpak",
+    ),
+    (
+        "the_adicts-ode-to-joy_vst_cover.feedpak",
+        "content/starter/the_adicts-ode-to-joy_vst_cover.feedpak",
+    ),
+]
+_STARTER_SEED_MARKER = ".starter-content-seeded"
+
+
+def _seed_builtin_starter_content(dlc: Path | None = None) -> None:
+    """Copy bundled starter songs into ``DLC_DIR/starter/`` exactly once.
+
+    Guarded by ``CONFIG_DIR/.starter-content-seeded``: the first run with a DLC
+    folder configured seeds the packs and writes the marker; subsequent runs are
+    no-ops, so a user who deletes the starter song does not get it back on the
+    next launch. Symlink-safe; never deletes user files. Logs, never raises.
+    """
+    try:
+        marker = CONFIG_DIR / _STARTER_SEED_MARKER
+        # Already seeded? The marker is a sentinel: any existing path there
+        # (regular file, or a symlink/dir a user deliberately planted to opt
+        # out) means "done" — lstat so we detect it without following a symlink.
+        # Worst case of a planted marker is simply no starter content, never a
+        # data write; the O_EXCL|O_NOFOLLOW create below refuses to write
+        # *through* a symlink regardless.
+        try:
+            os.lstat(marker)
+            return
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.warning("Starter content seed: cannot stat marker %s: %s", marker, exc)
+            return
+        if dlc is None:
+            dlc = _get_dlc_dir()
+        if dlc is None:
+            # No DLC yet — leave the marker unwritten so we retry once a
+            # library folder is configured.
+            log.debug("Starter content seed: no DLC folder configured, skipping")
+            return
+        present = _copy_builtin_packs(
+            _feedBack_server_root(),
+            dlc / _BUILTIN_STARTER_SUBDIR,
+            _BUILTIN_STARTER_SOURCES,
+            "Starter content seed",
+            update_existing=False,
+        )
+        # Only mark seeding complete once every starter pack is actually in
+        # place. If a source was missing or a copy failed, leave the marker
+        # unwritten so the next launch retries rather than permanently skipping.
+        if present < len(_BUILTIN_STARTER_SOURCES):
+            log.info(
+                "Starter content seed: %d/%d packs present, will retry next launch",
+                present,
+                len(_BUILTIN_STARTER_SOURCES),
+            )
+            return
+        # Record completion with an exclusive, no-follow create so a planted or
+        # raced symlink at the marker path can't redirect the write outside
+        # CONFIG_DIR. O_EXCL fails (EEXIST) on any existing path including a
+        # symlink, so we never write through one.
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(marker, flags, 0o644)
+            try:
+                os.write(fd, b"1\n")
+            finally:
+                os.close(fd)
+        except FileExistsError:
+            pass  # already marked (or a non-regular path is squatting) — fine
+        except OSError as exc:
+            log.warning("Starter content seed: could not write marker %s: %s", marker, exc)
+    except Exception:
+        log.warning("Starter content seed: unexpected error", exc_info=True)
 
 
 def _background_scan():
@@ -5321,6 +6193,7 @@ def _background_scan():
         return
 
     _seed_builtin_diagnostic_sloppaks(dlc)
+    _seed_builtin_starter_content(dlc)
 
     # Listing can fail on macOS without Full Disk Access, or on Docker if the
     # path isn't shared. Report the failure explicitly rather than silently
@@ -5455,6 +6328,27 @@ def _background_scan():
 _scan_kick_lock = threading.Lock()
 _scan_rescan_pending = False
 
+# Handles to the running scan / enrichment worker threads. Both use the shared
+# MetadataDB connection, so teardown/shutdown MUST join them before closing that
+# connection — a daemon thread mid-query on a closed SQLite conn is a native
+# use-after-free that segfaults the process (seen flaky in CI). Set by
+# _kick_scan / _kick_enrich; joined by _join_background_db_threads().
+_scan_thread: threading.Thread | None = None
+_enrich_thread: threading.Thread | None = None
+
+
+def _join_background_db_threads(timeout: float = 30.0) -> None:
+    """Block until the background scan + enrichment workers finish (or timeout).
+
+    A scan kicks enrichment on completion, so join the scan first — by the time
+    it returns, _kick_enrich() has set _enrich_thread — then join enrichment."""
+    st = _scan_thread
+    if st is not None and st.is_alive():
+        st.join(timeout)
+    et = _enrich_thread
+    if et is not None and et.is_alive():
+        et.join(timeout)
+
 
 def _kick_scan() -> bool:
     """Request a library rescan, single-flight + coalescing.
@@ -5466,7 +6360,7 @@ def _kick_scan() -> bool:
     until the next periodic pass. Multiple late-arriving requests coalesce
     into a single follow-up.
     """
-    global _scan_rescan_pending
+    global _scan_rescan_pending, _scan_thread
     with _scan_kick_lock:
         if _scan_status["running"]:
             _scan_rescan_pending = True
@@ -5474,7 +6368,8 @@ def _kick_scan() -> bool:
         # Mark running synchronously so a parallel _kick_scan() observes it
         # before the worker thread has a chance to reassign _scan_status.
         _scan_status["running"] = True
-    threading.Thread(target=_scan_runner, daemon=True).start()
+    _scan_thread = threading.Thread(target=_scan_runner, daemon=True)
+    _scan_thread.start()
     return True
 
 
@@ -5512,7 +6407,16 @@ def _scan_runner():
 
 _enrich_kick_lock = threading.Lock()
 _enrich_pending_pass = False
-_enrich_status = {"running": False, "processed": 0, "last_pass_at": None}
+# processed = phase-1 stubs stamped this pass (legacy field). total/matched =
+# the phase-2 MATCHING progress the "Refresh Metadata" batch bar reads (the
+# slow, rate-limited part worth a progress readout); current = the song being
+# matched right now, which drives the per-tile "working" badge.
+_enrich_status = {"running": False, "processed": 0, "last_pass_at": None,
+                  "total": 0, "matched": 0, "current": None}
+# Cooperative cancel for the Stop button: the matching/art loops check it
+# between songs (an in-flight ≤1/s lookup can't be interrupted, but no new one
+# is started). Set by /api/enrichment/cancel, cleared when a fresh pass kicks.
+_enrich_cancel = threading.Event()
 # Minimum spacing between EXTERNAL lookups (design: ≤1 req/s + local cache).
 _ENRICH_MIN_INTERVAL = 1.1
 _enrich_last_fetch = 0.0
@@ -5616,13 +6520,234 @@ def _mb_http_get(path: str, params: dict) -> dict | None:
         raise EnrichTransportError("bad JSON from musicbrainz") from e
 
 
-def _mb_search_recordings(artist, title, limit: int = 8) -> list[dict]:
-    """Text search (tier 2–4): denoised Lucene query over /recording."""
+def _mb_search_recordings(artist, title, limit: int = 12) -> list[dict]:
+    """Text search (tier 2–4): denoised Lucene query over /recording. The strict
+    query drops live-only recordings and the ranker rewards the studio take, so a
+    slightly larger default result set gives the re-ranker room to surface the
+    canonical version.
+
+    Runs the strict field-phrase query first (high precision); if it finds
+    nothing, retries ONCE with a loose term query. The strict phrase only matches
+    MusicBrainz's *primary* artist/title, so a recording stored under a non-Latin
+    primary name (大橋純子) whose romanized form ("Junko Ohashi") is only an alias
+    is invisible to it — the loose query searches aliases and rescues it. The
+    retry spends a second throttled request only on a miss; results are re-scored
+    by rank_candidates, so the looser recall doesn't lower match quality
+    (auto-accept still needs the per-field floors)."""
     query = mb_match.build_recording_query(artist, title)
-    if not query:
+    cands: list[dict] = []
+    if query:
+        body = _mb_http_get("recording", {"query": query, "limit": limit})
+        cands = mb_match.parse_search_response(body or {})
+    if not cands:
+        loose = mb_match.build_recording_query(artist, title, loose=True)
+        if loose and loose != query:
+            body = _mb_http_get("recording", {"query": loose, "limit": limit})
+            cands = mb_match.parse_search_response(body or {})
+    return cands
+
+
+def _mb_search_release_groups(query: str, limit: int = 8) -> list[dict]:
+    """Text search /release-group for the Change-cover picker: albums matching a
+    free query, each mapped to its Cover Art Archive front thumb. One request;
+    tiles whose CAA art is missing self-hide client-side (front-250 404s). Lets a
+    cover be found even for a song with no metadata match (the city-pop pile)."""
+    q = (query or "").strip()
+    if not q:
         return []
-    body = _mb_http_get("recording", {"query": query, "limit": limit})
-    return mb_match.parse_search_response(body or {})
+    body = _mb_http_get("release-group", {"query": q, "limit": limit})
+    out: list[dict] = []
+    for rg in ((body or {}).get("release-groups") or []):
+        rid = rg.get("id")
+        if not rid:
+            continue
+        # artist-credit is a list of {name, joinphrase, artist} (joinphrase glues
+        # collaborations) — reconstruct the credited name.
+        artist = "".join(
+            (c.get("name", "") + c.get("joinphrase", "")) if isinstance(c, dict) else str(c)
+            for c in (rg.get("artist-credit") or [])
+        ).strip()
+        title = rg.get("title") or ""
+        year = (rg.get("first-release-date") or "")[:4]
+        out.append({
+            "id": rid,
+            "label": " · ".join(x for x in (title, artist, year) if x) or title or "Cover",
+            "thumb_url": f"https://coverartarchive.org/release-group/{rid}/front-250",
+        })
+    return out
+
+
+# ── AcoustID audio fingerprinting (content-based identification) ──────────────
+# Optional path: requires the Chromaprint `fpcalc` binary AND an AcoustID API
+# key ($ACOUSTID_API_KEY). Both absent ⇒ graceful no-op; the text matcher runs.
+
+_ACOUSTID_MAX_UPLOAD_BYTES = 256 * 1024 * 1024  # 256 MB — an uncompressed master
+
+
+def _fpcalc_bin() -> str | None:
+    """Locate the Chromaprint `fpcalc` binary: $FPCALC override, else PATH."""
+    import shutil
+    cand = os.environ.get("FPCALC")
+    if cand and Path(cand).exists():
+        return cand
+    return shutil.which("fpcalc")
+
+
+def _acoustid_settings() -> "tuple[bool, str]":
+    """(enabled, api_key) for AcoustID, resolved from settings with an env-var
+    fallback for the key. Opt-in: `acoustid_enabled` defaults off. The key lives
+    in settings so a user can set it themselves in the UI; $ACOUSTID_API_KEY is a
+    server-wide fallback for a headless deploy."""
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    enabled = cfg.get("acoustid_enabled", False) is True
+    key = cfg.get("acoustid_api_key")
+    if not isinstance(key, str) or not key.strip():
+        key = os.environ.get("ACOUSTID_API_KEY", "")
+    return enabled, (key or "").strip()
+
+
+def _acoustid_available() -> bool:
+    """True only when the user opted in, a key is set (settings or env), the
+    network is on, AND fpcalc exists."""
+    enabled, key = _acoustid_settings()
+    return (enabled
+            and _enrich_network_enabled()
+            and acoustid_match.is_configured(key)
+            and _fpcalc_bin() is not None)
+
+
+def _fpcalc(path: str) -> "tuple[int, str] | None":
+    """Fingerprint a local audio file → (duration_seconds, fingerprint). None on
+    any failure (missing binary/file, decode error, timeout)."""
+    binp = _fpcalc_bin()
+    if not binp or not Path(path).exists():
+        return None
+    import subprocess
+    import json as _json
+    try:
+        pr = subprocess.run([binp, "-json", str(path)],
+                            capture_output=True, timeout=30)
+    except Exception:
+        return None
+    if pr.returncode != 0:
+        return None
+    try:
+        data = _json.loads(pr.stdout.decode("utf-8", "replace"))
+        dur = int(round(float(data.get("duration"))))
+        fp = str(data.get("fingerprint") or "")
+    except Exception:
+        return None
+    if not fp or dur <= 0:
+        return None
+    return dur, fp
+
+
+def _acoustid_lookup(duration: int, fingerprint: str) -> list[dict]:
+    """Look a fingerprint up on AcoustID → candidate dicts (mb_match shape).
+    Throttled + offline-guarded like the MusicBrainz path. [] when unavailable
+    or no hit; raises EnrichTransportError for network-shaped failures."""
+    _, key = _acoustid_settings()
+    if not key or not _enrich_network_enabled():
+        return []
+    import requests
+    _enrich_throttle()
+    try:
+        # POST, not GET: a fingerprint is multi-KB (a 3.5-min track is ~3.5k
+        # chars), so a GET crams it into the URL and a long song overflows the
+        # server's URL limit → a spurious failure. AcoustID accepts the same
+        # params form-encoded in the body.
+        resp = requests.post(
+            f"{acoustid_match.ACOUSTID_API_ROOT}/lookup",
+            data={
+                "client": key, "format": "json",
+                "meta": acoustid_match.LOOKUP_META,
+                "duration": duration, "fingerprint": fingerprint,
+            },
+            headers={"User-Agent": _enrich_user_agent()},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        raise EnrichTransportError(str(e)) from e
+    if resp.status_code == 429:
+        raise EnrichTransportError("acoustid 429 (rate limited)")
+    if resp.status_code != 200:
+        raise EnrichTransportError(f"acoustid HTTP {resp.status_code}")
+    try:
+        body = resp.json()
+    except ValueError as e:
+        raise EnrichTransportError("bad JSON from acoustid") from e
+    return acoustid_match.parse_lookup_response(body)
+
+
+def _identify_by_fingerprint(path: str) -> list[dict]:
+    """fpcalc + AcoustID lookup for a local audio file. [] if fingerprinting is
+    unavailable, the file can't be read, or nothing matched. Available to the
+    library-enrichment pipeline as well as the /identify endpoint."""
+    if not _acoustid_available():
+        return []
+    fp = _fpcalc(path)
+    if not fp:
+        return []
+    return _acoustid_lookup(fp[0], fp[1])
+
+
+def _acoustid_gate() -> "JSONResponse | None":
+    """Shared availability gate for the identify endpoints: None when ready,
+    else a 412 needs_setup (opt-in off / no key → the UI re-prompts) or a 503
+    (set up but fpcalc/network missing). Never lets a caller pretend a
+    fingerprint ran."""
+    if _acoustid_available():
+        return None
+    enabled, key = _acoustid_settings()
+    if not enabled or not key:
+        return JSONResponse(
+            {"error": "audio fingerprinting not set up", "needs_setup": True,
+             "detail": "Turn on AcoustID and add a free API key to identify by audio — "
+                       "it reads the recording itself, far more reliable than text search."},
+            status_code=412)
+    return JSONResponse(
+        {"error": "audio fingerprinting unavailable", "needs_setup": False,
+         "detail": "the fpcalc (Chromaprint) binary was not found on the server"},
+        status_code=503)
+
+
+def _song_audio_file(filename: str) -> "str | None":
+    """Resolve a LIBRARY song (by filename/id) to a local master-audio file for
+    fingerprinting: the full-mix `original_audio` extracted from a sloppak, or a
+    loose folder's audio. None when the song can't be found or ships no full-mix
+    audio (some packs carry only stems). Mirrors serve_sloppak_file's containment
+    guards so a crafted filename can't read outside DLC_DIR / the pack."""
+    dlc = _get_dlc_dir()
+    if not dlc:
+        return None
+    resolved = _resolve_dlc_path(dlc, filename)
+    if resolved is None or not resolved.exists():
+        return None
+    if sloppak_mod.is_sloppak(resolved):
+        try:
+            canon = resolved.relative_to(dlc.resolve()).as_posix()
+        except ValueError:
+            return None
+        rel = (sloppak_mod.load_manifest(resolved) or {}).get("original_audio")
+        if not isinstance(rel, str) or not rel.strip():
+            return None
+        src = sloppak_mod.get_cached_source_dir(canon)
+        if src is None:
+            try:
+                src = sloppak_mod.resolve_source_dir(canon, dlc, SLOPPAK_CACHE_DIR)
+            except Exception:
+                return None
+        target = (src / rel.strip()).resolve()
+        try:
+            target.relative_to(src.resolve())
+        except ValueError:
+            return None
+        return str(target) if target.is_file() else None
+    try:
+        audio = loosefolder_mod.find_audio(resolved)
+    except Exception:
+        audio = None
+    return str(audio) if audio and Path(str(audio)).is_file() else None
 
 
 def _mb_lookup_recording(mbid: str) -> dict | None:
@@ -5650,6 +6775,78 @@ _MBID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 _ISRC_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{3}[0-9]{7}$")
 
 
+# ── Alias-aware scoring ───────────────────────────────────────────────────────
+# MusicBrainz stores many artists under a non-Latin PRIMARY name (大橋純子) with
+# the romanized form ("Junko Ohashi") only as an ALIAS. A recording search
+# returns the primary name in its artist-credit, never the aliases — so scoring
+# a romanized reference against the primary gives 0 and the match can't confirm.
+# We fetch the artist's aliases (one throttled lookup, process-cached) and hand
+# them to the scorer, but ONLY for a promising near-miss (title already agrees,
+# artist doesn't) so a normal pass spends no extra requests.
+_ALIAS_ENRICH_MAX = 3          # cap alias lookups per song/search (each is ≤1/s)
+_artist_alias_cache: dict[str, list[str]] = {}
+
+
+def _mb_artist_aliases(artist_id: str) -> list[str]:
+    """Romanized/alternate names for a MusicBrainz artist, process-cached (an
+    artist recurs across a whole discography, so a library of one artist costs
+    ONE lookup). Returns [] for an unknown/aliasless artist. Raises
+    EnrichTransportError on a network failure so the caller pauses the pass
+    (nothing is cached on failure → retried next pass)."""
+    aid = str(artist_id or "")
+    if aid in _artist_alias_cache:
+        return _artist_alias_cache[aid]
+    if not _MBID_RE.match(aid):
+        return []
+    body = _mb_http_get(f"artist/{aid}", {"inc": "aliases"})
+    names: list[str] = []
+    if body:
+        sort_name = str(body.get("sort-name") or "").strip()
+        if sort_name:
+            names.append(sort_name)          # often the romanized form for JP artists
+        for al in body.get("aliases") or []:
+            if isinstance(al, dict) and al.get("name"):
+                names.append(str(al["name"]))
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in names:
+        k = n.casefold()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(n)
+    out = out[:12]
+    _artist_alias_cache[aid] = out
+    return out
+
+
+def _alias_enrich(ref: dict, cands: list[dict]) -> None:
+    """Attach `artist_aliases` in place to candidates that look like the
+    non-Latin-primary case — title agrees with the reference but the primary
+    artist doesn't — so the scorer can confirm them via a romanized alias.
+    Bounded by _ALIAS_ENRICH_MAX + the process cache; a no-op when the
+    reference has no artist or nothing is aliasable."""
+    ref_artist = (ref.get("artist") or "").strip()
+    if not ref_artist:
+        return
+    spent = 0
+    for c in cands:
+        if spent >= _ALIAS_ENRICH_MAX:
+            break
+        if not isinstance(c, dict) or c.get("artist_aliases") is not None:
+            continue
+        aid = c.get("artist_id")
+        if not aid:
+            continue
+        # Only spend a lookup on a promising near-miss: the title already
+        # matches, but the primary artist doesn't (that's the alias signature).
+        if mb_match.similarity(ref.get("title"), c.get("title")) < mb_match.AUTO_TITLE_MIN:
+            continue
+        if mb_match.similarity(ref_artist, c.get("artist"), artist=True) >= mb_match.AUTO_ARTIST_MIN:
+            continue
+        c["artist_aliases"] = _mb_artist_aliases(aid)   # cached; attach [] to avoid refetch
+        spent += 1
+
+
 def _manifest_exact_ids(filename: str) -> dict:
     """Optional `mbid`/`isrc` from the pack manifest — the spec's additive
     identity keys. Feature-detected: packs published before that spec
@@ -5670,6 +6867,11 @@ def _manifest_exact_ids(filename: str) -> dict:
     if _MBID_RE.match(mbid):
         out["mbid"] = mbid
     isrc = str(manifest.get("isrc", "") or "").strip().upper()
+    # Spec 1.14.0: the stored form is the bare 12-char code, but ISRCs
+    # circulate hyphenated in the wild (US-ABC-24-00001) — the separators
+    # are presentation, not part of the code, so a hand-authored display
+    # form still matches (consumers SHOULD strip before comparing).
+    isrc = isrc.replace("-", "").replace(" ", "")
     if _ISRC_RE.match(isrc):
         out["isrc"] = isrc
     return out
@@ -5694,8 +6896,335 @@ def _enrich_backoff_elapsed(attempts, last_attempt_at, now: float) -> bool:
 # handful is noise the user has to scroll past.
 _ENRICH_MAX_CANDIDATES = 5
 
+# ── Cover art (R3/P9) ─────────────────────────────────────────────────────────
+# The art cache dir (CONFIG_DIR/art_cache) holds two kinds of file:
+#   {safe_name}.png / .gif  — USER OVERRIDES (upload or URL-fetch; never
+#                             evicted, removed only with the song or by the
+#                             explicit remove-override route)
+#   caa_{release_mbid}.jpg  — COVER ART ARCHIVE fetches, keyed by release so
+#                             every chart of the same release shares one file;
+#                             size-capped LRU (evictions reset the enrichment
+#                             rows so a later pass may re-fetch)
+_CAA_CACHE_CAP_BYTES = 200 * 1024 * 1024
+# Per-cover cap on a single CAA fetch. The 500px thumbnail is normally tens of
+# KB; this bounds any one response independently of the aggregate LRU cap so a
+# single oversized (or misbehaving) release can't blow up memory/disk.
+_CAA_MAX_BYTES = 10 * 1024 * 1024
+# A release MBID is a UUID; before interpolating it into a cache-file path we
+# require a conservative token (alphanumerics, hyphen, underscore only) so no
+# separator or '.' can ever appear — blocks path traversal. Defence in depth:
+# cheap even though the DB only ever holds MusicBrainz UUIDs. (Distinct name
+# from the strict recording-MBID _MBID_RE above — this only gates a filename.)
+_CAA_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
-def _enrich_one(row: dict, auto_min: float | None = None) -> None:
+
+def _caa_http_get(release_id: str) -> bytes | None:
+    """Fetch a release's front cover from the Cover Art Archive — the one
+    network seam of the art layer (tests fake exactly this). Same etiquette
+    as the MusicBrainz client: throttled, identified, offline-guarded.
+    Returns the image bytes, None when the release has no cover (404), and
+    raises EnrichTransportError for anything network-shaped."""
+    if not _enrich_network_enabled():
+        raise EnrichTransportError("enrichment network disabled")
+    import requests
+    _enrich_throttle()
+    try:
+        with requests.get(
+            f"https://coverartarchive.org/release/{release_id}/front-500",
+            headers={"User-Agent": _enrich_user_agent()},
+            timeout=15, allow_redirects=True, stream=True,
+        ) as resp:
+            if resp.status_code == 404:
+                return None
+            if resp.status_code != 200:
+                raise EnrichTransportError(f"cover art archive HTTP {resp.status_code}")
+            # Stream with a per-file cap so a huge response never fully downloads.
+            data = b""
+            for chunk in resp.iter_content(65536):
+                data += chunk
+                if len(data) > _CAA_MAX_BYTES:
+                    # Not network-shaped: settle just this row as 'error' (the
+                    # art loop's generic handler) rather than pausing the pass.
+                    raise ValueError("cover art exceeds size cap")
+            return data
+    except requests.RequestException as e:
+        raise EnrichTransportError(str(e)) from e
+
+
+def _caa_release_index(release_id: str) -> dict | None:
+    """Fetch a release's Cover Art Archive INDEX (json — image METADATA, not
+    image bytes): the cover picker's one network seam (tests fake exactly
+    this). Same etiquette as _caa_http_get: throttled, identified,
+    offline-guarded. Returns the parsed index dict, None when the archive
+    has no art for the release (404), and raises EnrichTransportError for
+    anything network-shaped."""
+    if not _enrich_network_enabled():
+        raise EnrichTransportError("enrichment network disabled")
+    import requests
+    _enrich_throttle()
+    try:
+        resp = requests.get(
+            f"https://coverartarchive.org/release/{release_id}",
+            headers={"User-Agent": _enrich_user_agent(),
+                     "Accept": "application/json"},
+            timeout=15, allow_redirects=True)
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            raise EnrichTransportError(f"cover art archive HTTP {resp.status_code}")
+        body = resp.json()
+        return body if isinstance(body, dict) else None
+    except requests.RequestException as e:
+        raise EnrichTransportError(str(e)) from e
+    except ValueError as e:
+        # Non-JSON body — treat as a transport blip (nothing gets cached, a
+        # later picker-open retries) rather than caching an empty index.
+        raise EnrichTransportError(f"cover art archive returned non-JSON: {e}") from e
+
+
+# Per-release lock so two concurrent /art/candidates opens for the SAME
+# release serialise their read→fetch→write (the "index cached, no second
+# fetch" invariant). Different releases still fetch in parallel; the guard
+# lock only protects the tiny registry lookup.
+_caa_index_locks: dict[str, threading.Lock] = {}
+_caa_index_locks_guard = threading.Lock()
+
+
+def _caa_index_lock(release_id: str) -> threading.Lock:
+    with _caa_index_locks_guard:
+        lock = _caa_index_locks.get(release_id)
+        if lock is None:
+            lock = _caa_index_locks[release_id] = threading.Lock()
+        return lock
+
+
+def _caa_index_cached(release_id: str) -> list[dict]:
+    """A release's CAA index images through a TTL-less on-disk cache
+    (`caa_index_{id}.json` beside the cover files — indexes are stable, and
+    a 404 is cached as an empty index so a coverless release is never
+    re-asked). Outside the network seam on purpose: tests fake
+    _caa_release_index and still exercise this cache. Raises
+    EnrichTransportError on a cache-miss network failure (the caller stops
+    asking for further releases); malformed ids/bodies yield []."""
+    if not _CAA_ID_RE.match(str(release_id or "")):
+        return []
+    cache_file = _enrichment_art_dir() / f"caa_index_{release_id}.json"
+    # Hold the per-id lock across the check→fetch→write so a concurrent open
+    # for the same release finds the freshly-written cache instead of racing a
+    # second fetch. (The network fetch sleeps in _enrich_throttle under a
+    # different lock — no deadlock; a different release is never blocked.)
+    with _caa_index_lock(str(release_id)):
+        if cache_file.is_file():
+            try:
+                body = json.loads(cache_file.read_text(encoding="utf-8"))
+                imgs = body.get("images") if isinstance(body, dict) else None
+                if isinstance(imgs, list):
+                    return imgs
+            except (OSError, ValueError):
+                pass  # unreadable/corrupt cache → refetch below
+        body = _caa_release_index(release_id)
+        if body is None or not isinstance(body.get("images"), list):
+            body = {"images": []}
+        try:
+            cache_file.write_text(json.dumps(body), encoding="utf-8")
+        except OSError:
+            pass  # cache is best-effort; the response still serves
+        return body["images"]
+
+
+def _art_safe_name(filename: str) -> str:
+    """The flattened cache-file stem the art routes key user overrides on
+    (matches the legacy /art/upload naming, so old uploads keep working)."""
+    return filename.replace("/", "_").replace(" ", "_")
+
+
+def _art_override_paths(filename: str) -> list[Path]:
+    """Existing user-override art files for a song, GIF first (it wins —
+    the animated local-only bonus outranks a stale PNG)."""
+    stem = _art_safe_name(filename)
+    return [p for p in (ART_CACHE_DIR / f"{stem}.gif", ART_CACHE_DIR / f"{stem}.png")
+            if p.is_file()]
+
+
+def _song_pack_art_exists(filename: str) -> bool:
+    """Whether the song carries its own art (sloppak cover / loose-folder
+    image). Pack art always outranks a CAA fetch, so the art worker marks
+    these and never spends a request on them."""
+    try:
+        dlc = _get_dlc_dir()
+        if not dlc:
+            return False
+        p = _resolve_dlc_path(dlc, filename)
+        if p is None or not p.exists():
+            return False
+        if sloppak_mod.is_sloppak(p):
+            return sloppak_mod.read_cover_bytes(p) is not None
+        if loosefolder_mod.is_loose_song(p):
+            return loosefolder_mod.find_art(p) is not None
+    except Exception:
+        pass
+    return False
+
+
+def _prune_caa_cache() -> None:
+    """Keep the CAA side of the art cache under its size cap: evict the
+    oldest caa_* files (mtime LRU) and reset the enrichment rows that pointed
+    at them. User-override files are never touched."""
+    try:
+        files = sorted(ART_CACHE_DIR.glob("caa_*.jpg"), key=lambda p: p.stat().st_mtime)
+        total = sum(p.stat().st_size for p in files)
+        evicted: list[str] = []
+        while files and total > _CAA_CACHE_CAP_BYTES:
+            victim = files.pop(0)
+            try:
+                total -= victim.stat().st_size
+                victim.unlink()
+                evicted.append(str(victim))
+            except OSError:
+                break
+        if evicted:
+            meta_db.clear_enrichment_art_paths(evicted)
+            log.info("art cache: evicted %d cover(s) to stay under the cap", len(evicted))
+    except Exception:
+        log.exception("art cache prune failed")
+
+
+def _enrich_art_one(row: dict) -> bool:
+    """Resolve one matched song's cover-art situation (art worker, phase 3).
+    Returns True when a cover was actually fetched. Every outcome writes an
+    art_state so the row never re-queues:
+      'pack'  — the song ships its own art (it wins; nothing to do)
+      'user'  — an override exists (it wins; nothing to do)
+      'caa'   — front cover cached (possibly deduped from an earlier fetch
+                of the same release — no network on that path)
+      'none'  — the Cover Art Archive has no cover for this release
+    Network errors raise EnrichTransportError → the pass pauses and the row
+    stays unevaluated for the next kick."""
+    fn, release_id = row["filename"], row["mb_release_id"]
+    if not release_id or not _CAA_ID_RE.match(str(release_id)):
+        # Malformed release id — never build a cache path from it. Settle the
+        # row as 'error' so it isn't re-queued every pass.
+        meta_db.set_enrichment_art(fn, None, "error")
+        return False
+    if _song_pack_art_exists(fn):
+        meta_db.set_enrichment_art(fn, None, "pack")
+        return False
+    if _art_override_paths(fn):
+        meta_db.set_enrichment_art(fn, None, "user")
+        return False
+    cache_file = _enrichment_art_dir() / f"caa_{release_id}.jpg"
+    if cache_file.is_file():
+        meta_db.set_enrichment_art(fn, str(cache_file), "caa")
+        return False
+    data = _caa_http_get(release_id)
+    if data is None:
+        meta_db.set_enrichment_art(fn, None, "none")
+        return False
+    cache_file.write_bytes(data)
+    meta_db.set_enrichment_art(fn, str(cache_file), "caa")
+    _prune_caa_cache()
+    return True
+
+
+_ENRICH_APPLY_FIELDS = {
+    # Per-field auto-apply toggle → the candidate fields it governs. The
+    # MusicBrainz ids + isrc are deliberately NOT here: they're identity,
+    # not display — the art fetch and any future re-match need them stamped
+    # even when every display field is toggled off.
+    "enrich_apply_names": ("artist", "title", "album", "artist_sort"),
+    "enrich_apply_year": ("year",),
+    "enrich_apply_genres": ("genres",),
+}
+
+
+def _enrich_blocked_apply_keys(cfg: dict) -> frozenset:
+    """The per-field auto-apply toggle keys that are currently OFF (suppressed).
+    Its complement (`_ENRICH_APPLY_FIELDS` minus these) is what an automatic
+    match may canonicalize."""
+    return frozenset(k for k in _ENRICH_APPLY_FIELDS if cfg.get(k, True) is False)
+
+
+def _enrich_apply_mask(cfg: dict) -> str:
+    """Canonical marker of the suppressed apply keys, persisted on each
+    automatic match so re-enabling a field re-queues the row for backfill
+    (enrichment_pending) and a partial match can't seed siblings
+    (enrichment_cache_lookup). '' = nothing suppressed (the default)."""
+    return ",".join(sorted(_enrich_blocked_apply_keys(cfg)))
+
+
+def _enrich_field_filter(cfg: dict):
+    """Build the cand filter for AUTOMATIC matches from the per-field
+    auto-apply settings: strips the display fields whose toggle is off
+    before they're stamped as canonical. Returns None when everything is
+    on (the default) so the common path stays zero-copy. Review candidates
+    and user-confirmed picks bypass this — a match the user confirms in
+    the modal applies in full."""
+    blocked = {f for key in _enrich_blocked_apply_keys(cfg)
+               for f in _ENRICH_APPLY_FIELDS[key]}
+    if not blocked:
+        return None
+    return lambda cand: {k: v for k, v in cand.items() if k not in blocked}
+
+
+# Strips a trailing tag parenthetical from a filename stem — "(440Hz)",
+# "(Live)", "(No Lead)", the retune/arrangement noise CDLC names carry.
+_FN_TAG_RE = re.compile(r"\s*\([^)]*\)")
+
+
+def _artist_title_from_filename(filename: str) -> dict | None:
+    """Derive artist + title from the CDLC filename convention
+    'Artist_Song-Title_v1_p.feedpak' — spaces written as hyphens WITHIN a
+    field, underscores separating Artist | Title | version/arrangement. Used
+    ONLY as a match SEED for packs whose own `artist` field is blank (a large
+    slice of community charts): text search needs an artist, and the filename
+    reliably carries it. This never becomes displayed metadata — the shown
+    values still come from the confirmed MusicBrainz match (provenance
+    'matched'), so nothing estimated is presented as author-set; if no match is
+    found, the pack stays exactly as-is. Returns None when the name doesn't fit
+    the convention (so a non-CDLC pack falls through untouched)."""
+    base = filename.replace("\\", "/").rsplit("/", 1)[-1]
+    base = base.rsplit(".", 1)[0]                 # drop the extension
+    base = _FN_TAG_RE.sub("", base).strip()       # drop "(440Hz)" etc.
+    parts = [p for p in base.split("_") if p]
+    if len(parts) < 2:
+        return None
+    artist = parts[0].replace("-", " ").strip()
+    title = parts[1].replace("-", " ").strip()
+    if not artist or not title:
+        return None
+    return {"artist": artist, "title": title}
+
+
+# A per-song LOCK (Fix-metadata popup) → the candidate display keys it
+# suppresses on an AUTOMATIC match. Identity keys (recording/release/artist ids,
+# isrc) are deliberately absent: a locked DISPLAY field still gets matched for
+# art + future re-match, it just isn't re-canonicalized behind the user's back.
+_LOCK_FIELD_TO_CAND = {
+    "artist": ("artist", "artist_sort"),
+    "title": ("title",),
+    "album": ("album",),
+    "year": ("year",),
+    "genre": ("genres",),
+}
+
+
+def _compose_lock_filter(base_filter, locked_fields):
+    """Wrap the pass's global per-field apply-filter with a per-song filter that
+    also strips the song's LOCKED display fields, so an automatic match never
+    re-canonicalizes a field the user pinned. Returns base_filter unchanged when
+    the song has no relevant lock (the common path)."""
+    blocked = {ck for f in locked_fields for ck in _LOCK_FIELD_TO_CAND.get(f, ())}
+    if not blocked:
+        return base_filter
+
+    def lock_filter(cand):
+        c = base_filter(cand) if base_filter else cand
+        return {k: v for k, v in c.items() if k not in blocked}
+    return lock_filter
+
+
+def _enrich_one(row: dict, auto_min: float | None = None, field_filter=None,
+                apply_mask: str = "") -> None:
     """The matcher (P8; replaces P7's no-op). Precedence per design §5:
 
     1. local match-cache by content_hash — another chart of the same
@@ -5708,17 +7237,33 @@ def _enrich_one(row: dict, auto_min: float | None = None) -> None:
 
     `auto_min` is the user's auto-apply confidence setting (None → the
     engine default); it moves only the auto/review boundary of step 3 —
-    the per-field floors and exact-key tiers are unaffected. Never touches
-    a `manual` row (the writer enforces it). Network errors raise
-    EnrichTransportError so the pass pauses instead of burning attempts
-    while offline."""
+    the per-field floors and exact-key tiers are unaffected. `field_filter`
+    (from _enrich_field_filter) strips per-field-disabled display values
+    from every AUTOMATIC stamp — all three steps here are automatic, so it
+    applies to each; the review tier stores candidates unfiltered because
+    accepting one is a user action. Never touches a `manual` row (the
+    writer enforces it). `apply_mask` (the suppressed keys, from
+    _enrich_apply_mask) is stamped on each AUTOMATIC match so a later
+    re-enable re-queues the row for backfill and a partial match can't seed
+    siblings. Network errors raise EnrichTransportError so the pass pauses
+    instead of burning attempts while offline."""
     fn, chash = row["filename"], row["content_hash"]
+    # Respect per-song field LOCKS (Fix-metadata popup): an automatic match must
+    # not re-canonicalize a field the user pinned. Compose the lock filter onto
+    # the pass's global apply-filter — both the cache-copy and text-match auto
+    # paths run their candidate through it. (Review/manual picks bypass the
+    # filter, so confirming a match in the modal is an explicit override.)
+    locked = meta_db.locked_fields(fn)
+    if locked:
+        field_filter = _compose_lock_filter(field_filter, locked)
 
     cached = meta_db.enrichment_cache_lookup(chash, exclude_filename=fn)
     if cached:
         score = cached.pop("score", None)
+        if field_filter:
+            cached = field_filter(cached)
         meta_db.apply_enrichment_match(fn, chash, "matched", source="cache",
-                                       score=score, cand=cached)
+                                       score=score, cand=cached, apply_mask=apply_mask)
         return
 
     ids = _manifest_exact_ids(fn)
@@ -5726,22 +7271,43 @@ def _enrich_one(row: dict, auto_min: float | None = None) -> None:
         cand = _mb_lookup_recording(ids["mbid"])
         if cand:
             meta_db.apply_enrichment_match(fn, chash, "matched", source="mbid",
-                                           score=1.0, cand=cand)
+                                           score=1.0, apply_mask=apply_mask,
+                                           cand=field_filter(cand) if field_filter else cand)
             return
         # A 404'd mbid (typo'd manifest) falls through to the text tiers.
+    # A pack that left `artist` blank can't be text-matched (search needs an
+    # artist, and the per-field floor rejects a blank one) — so when it's blank,
+    # seed the query/scoring from the filename's Artist_Song convention. Seed
+    # only: fn/chash and the stored row are untouched, and the DISPLAYED values
+    # still come from the confirmed match. The exact-key tiers above don't need
+    # it (mbid/isrc identify without text).
+    ref = row
+    if not (row.get("artist") or "").strip():
+        derived = _artist_title_from_filename(fn)
+        if derived:
+            ref = {**row, **derived}
+
     if ids.get("isrc"):
-        cands = mb_match.rank_candidates(row, _mb_lookup_isrc(ids["isrc"]))
+        cands = mb_match.rank_candidates(ref, _mb_lookup_isrc(ids["isrc"]))
         if cands:
             meta_db.apply_enrichment_match(fn, chash, "matched", source="isrc",
-                                           score=1.0, cand=cands[0])
+                                           score=1.0, apply_mask=apply_mask,
+                                           cand=field_filter(cands[0]) if field_filter else cands[0])
             return
 
-    ranked = mb_match.rank_candidates(row, _mb_search_recordings(row.get("artist"), row.get("title")))
+    cands = _mb_search_recordings(ref.get("artist"), ref.get("title"))
+    # Alias-enrich promising near-misses (title agrees, primary artist doesn't)
+    # so a non-Latin-primary artist can confirm via its romanized alias, then
+    # rank once with the aliases in hand. `ref` carries any filename-derived
+    # artist seed, so alias scoring runs against the searched identity.
+    _alias_enrich(ref, cands)
+    ranked = mb_match.rank_candidates(ref, cands)
     best = ranked[0] if ranked else None
-    tier = mb_match.classify(row, best, best["score"], auto_min=auto_min) if best else "none"
+    tier = mb_match.classify(ref, best, best["score"], auto_min=auto_min) if best else "none"
     if tier == "auto":
         meta_db.apply_enrichment_match(fn, chash, "matched", source="text",
-                                       score=best["score"], cand=best)
+                                       score=best["score"], apply_mask=apply_mask,
+                                       cand=field_filter(best) if field_filter else best)
     elif tier == "review":
         meta_db.apply_enrichment_match(fn, chash, "review", source="text",
                                        score=best["score"],
@@ -5761,10 +7327,22 @@ def _background_enrich():
     `failed` rows whose backoff has elapsed; a transport failure pauses it
     (state untouched, no attempt burned) and the next kick retries. Offline
     (kill-switch or the test env) skips phase 2 entirely. Never drains in a
-    loop — a dead network would make that spin forever."""
+    loop — a dead network would make that spin forever. Between songs it
+    honours the Stop button's cancel flag (phases 2 and 3), so a long trickle
+    can be halted without waiting for the whole queue to drain."""
     _enrich_status["processed"] = 0
+    _enrich_status["total"] = 0
+    _enrich_status["matched"] = 0
+    _enrich_status["current"] = None
+    # User settings gate the BACKGROUND matcher only (the review modal's
+    # manual search/fix stays available when it's off); read once per pass,
+    # up front so the pending query can honour the per-field apply mask
+    # (a re-enabled field re-queues its `matched` rows for backfill).
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    allowed_keys = frozenset(_ENRICH_APPLY_FIELDS) - _enrich_blocked_apply_keys(cfg)
+    apply_mask = _enrich_apply_mask(cfg)
     try:
-        pending = meta_db.enrichment_pending(limit=100000)
+        pending = meta_db.enrichment_pending(limit=100000, allowed_keys=allowed_keys)
     except Exception:
         log.exception("enrichment: pending query failed")
         return
@@ -5776,9 +7354,6 @@ def _background_enrich():
         _enrich_status["processed"] += 1
     _enrich_status["last_pass_at"] = time.time()
 
-    # User settings gate the BACKGROUND matcher only (the review modal's
-    # manual search/fix stays available when it's off); read once per pass.
-    cfg = _load_config(CONFIG_DIR / "config.json") or {}
     if cfg.get("enrich_enabled", True) is False:
         if pending:
             log.info("Enrichment pass: %d rows stamped (matching disabled in Settings)", len(pending))
@@ -5793,28 +7368,47 @@ def _background_enrich():
             log.info("Enrichment pass: %d rows stamped (network disabled — matching skipped)", len(pending))
         return
 
+    # Scraper options (R1), read from the same per-pass cfg: `mb_on` gates
+    # the matcher (phase 2), `art_on` the cover-art fetch (phase 3 — the
+    # Cover Art Archive is the only automatic art source today, so the
+    # source toggle and the cover-art apply toggle both have to be on).
+    mb_on = cfg.get("enrich_src_musicbrainz", True) is not False
+    art_on = (cfg.get("enrich_src_caa", True) is not False
+              and cfg.get("enrich_apply_art", True) is not False)
+    field_filter = _enrich_field_filter(cfg)
+
     now = time.time()
     retriable = []
-    try:
-        retriable = [r for r in meta_db.enrichment_failed_rows(limit=100000)
-                     if _enrich_backoff_elapsed(r.get("attempts"), r.get("last_attempt_at"), now)]
-    except Exception:
-        log.exception("enrichment: failed-row query failed")
+    if mb_on:
+        try:
+            retriable = [r for r in meta_db.enrichment_failed_rows(limit=100000)
+                         if _enrich_backoff_elapsed(r.get("attempts"), r.get("last_attempt_at"), now)]
+        except Exception:
+            log.exception("enrichment: failed-row query failed")
+    elif pending:
+        log.info("Enrichment pass: %d rows stamped (MusicBrainz source disabled in Settings)", len(pending))
     matched = 0
     # A `failed` row with a changed identity hash can surface in BOTH lists;
     # de-dup by filename so each row consumes the rate budget only once.
     seen_filenames = set()
     queue = []
-    for row in pending + retriable:
+    for row in (pending + retriable) if mb_on else []:
         fn = row.get("filename")
         if fn in seen_filenames:
             continue
         seen_filenames.add(fn)
         queue.append(row)
+    _enrich_status["total"] = len(queue)
     for row in queue:
+        if _enrich_cancel.is_set():
+            log.info("enrichment: pass cancelled by user after %d matched", matched)
+            break
+        _enrich_status["current"] = row.get("filename")
         try:
-            _enrich_one(row, auto_min=auto_min)
+            _enrich_one(row, auto_min=auto_min, field_filter=field_filter,
+                        apply_mask=apply_mask)
             matched += 1
+            _enrich_status["matched"] = matched
         except EnrichTransportError as e:
             log.info("enrichment: network unavailable, pass paused (%s)", e)
             break
@@ -5828,21 +7422,60 @@ def _background_enrich():
                     source="error", bump_attempts=True)
             except Exception:
                 pass
-    if pending or retriable:
+    _enrich_status["current"] = None
+    if mb_on and (pending or retriable):
         log.info("Enrichment pass: %d rows stamped, %d matched", len(pending), matched)
+
+    # Phase 3 — cover art (R3/P9). For freshly-matched songs, resolve the art
+    # situation once: songs with their own pack art (or a user override) are
+    # marked and skipped; the rest fetch the release's front cover from the
+    # Cover Art Archive into the size-capped cache. Same pause-on-transport-
+    # error rule as matching — a dead network never burns a row's evaluation.
+    # Rows skipped here stay art_state NULL, so re-enabling the toggles picks
+    # them up on the next pass — nothing is permanently forfeited.
+    if not art_on:
+        return
+    try:
+        art_rows = meta_db.enrichment_art_pending(limit=100000)
+    except Exception:
+        log.exception("enrichment: art-pending query failed")
+        return
+    fetched = 0
+    for row in art_rows:
+        if _enrich_cancel.is_set():
+            log.info("enrichment: art pass cancelled by user after %d fetched", fetched)
+            break
+        try:
+            fetched += 1 if _enrich_art_one(row) else 0
+        except EnrichTransportError as e:
+            log.info("enrichment: network unavailable, art pass paused (%s)", e)
+            break
+        except Exception as e:
+            log.warning("enrichment art failed for %s: %s", row.get("filename"), e)
+            try:
+                meta_db.set_enrichment_art(row["filename"], None, "error")
+            except Exception:
+                pass
+    if art_rows:
+        log.info("Enrichment art pass: %d evaluated, %d covers fetched", len(art_rows), fetched)
 
 
 def _kick_enrich() -> bool:
     """Request an enrichment pass, single-flight + coalescing (the _kick_scan
     contract): True = a worker thread was started, False = one is running and
     a follow-up pass was queued."""
-    global _enrich_pending_pass
+    global _enrich_pending_pass, _enrich_thread
     with _enrich_kick_lock:
         if _enrich_status["running"]:
             _enrich_pending_pass = True
             return False
+        # A fresh pass supersedes any prior Stop — clear the flag so the new
+        # pass isn't cancelled the instant it checks (a stale set() from a
+        # cancelled-then-re-kicked run would otherwise abort it immediately).
+        _enrich_cancel.clear()
         _enrich_status["running"] = True
-    threading.Thread(target=_enrich_runner, daemon=True).start()
+    _enrich_thread = threading.Thread(target=_enrich_runner, daemon=True)
+    _enrich_thread.start()
     return True
 
 
@@ -5854,6 +7487,15 @@ def _enrich_runner():
         except Exception:
             log.exception("background enrichment failed unexpectedly")
         with _enrich_kick_lock:
+            _enrich_status["current"] = None
+            if _enrich_cancel.is_set():
+                # Stop: abandon any coalesced follow-up and clear the flag so the
+                # next kick starts clean. The current pass already broke out of
+                # its loop between songs (see _background_enrich).
+                _enrich_pending_pass = False
+                _enrich_cancel.clear()
+                _enrich_status["running"] = False
+                return
             if not _enrich_pending_pass:
                 _enrich_status["running"] = False
                 return
@@ -6341,25 +7983,125 @@ def enrichment_status():
         "last_pass_at": _enrich_status["last_pass_at"],
         "states": meta_db.enrichment_state_counts(),
         "total_songs": meta_db.count(),
+        # Per-pass matching progress for the "Refresh Metadata" batch bar +
+        # per-tile badges (total = songs queued to match this pass, matched =
+        # done so far, current = the one being matched now).
+        "total": _enrich_status.get("total", 0),
+        "matched": _enrich_status.get("matched", 0),
+        "current": _enrich_status.get("current"),
+        "cancelling": _enrich_cancel.is_set(),
     }
+
+
+@app.get("/api/enrichment/song/{filename:path}")
+def api_enrichment_song(filename: str):
+    """Read-only per-song match provenance for the Details drawer (launch
+    polish): which canonical identity this chart matched and how. A tiny
+    projection of the cache row — no candidates, no cache paths."""
+    row = meta_db.get_enrichment(filename)
+    if not row:
+        raise HTTPException(status_code=404, detail="no enrichment row")
+    return {k: row.get(k) for k in
+            ("match_state", "canon_artist", "canon_title",
+             "match_source", "match_score")}
 
 
 @app.post("/api/enrichment/kick")
 def api_enrichment_kick():
-    """The Settings "Match now" button: request an enrichment pass without
-    waiting for a scan to complete. Single-flight + coalescing like every
-    other kick — spamming it queues at most one follow-up pass."""
+    """The Settings "Match now" button AND the library's "Refresh Metadata"
+    button: request an enrichment pass without waiting for a scan to complete.
+    Processes the songs that still need it (unscanned/changed + retriable
+    failures) — already-matched songs are left alone, so on a fully-matched
+    library this is a fast no-op. Single-flight + coalescing like every other
+    kick — spamming it queues at most one follow-up pass."""
     return {"started": _kick_enrich()}
+
+
+@app.post("/api/enrichment/cancel")
+def api_enrichment_cancel():
+    """Stop button on the "Refresh Metadata" batch: signal the running pass to
+    halt after the current song (an in-flight ≤1/s lookup can't be interrupted,
+    but no new one is started) and drop any coalesced follow-up. A no-op when
+    nothing is running."""
+    was_running = _enrich_status["running"]
+    if was_running:
+        _enrich_cancel.set()
+    return {"ok": True, "was_running": was_running}
+
+
+@app.post("/api/enrichment/rematch")
+def api_enrichment_rematch(data: dict = Body(...)):
+    """The library "Refresh Metadata" button: force a fresh re-match of the
+    songs the grid is SHOWING (its visible/filtered window). Resets each to
+    `unscanned` so the next pass re-fetches it from scratch — EXCEPT user-pinned
+    `manual` rows, which are never auto-overwritten (apply_enrichment_match
+    guards that) — then kicks one pass. Scoped to the visible set on purpose:
+    fast (dozens of songs), visible (tiles animate), and it can't blow the whole
+    ≤1/s rate budget on a 1000-song library the way a full re-sweep would.
+    Returns the filenames actually queued so the UI badges exactly those."""
+    raw = (data or {}).get("filenames") or []
+    fns = [str(f) for f in raw if isinstance(f, str)][:500]
+    queued: list[str] = []
+    for fn in fns:
+        song = meta_db.enrichment_song_row(fn)
+        if not song:
+            continue
+        h = meta_db.enrichment_content_hash(
+            song["artist"], song["title"], song["album"], song["duration"])
+        # allow_manual_overwrite=False → a manual pin is left as-is (returns
+        # False), everything else resets to unscanned (returns True).
+        if meta_db.apply_enrichment_match(fn, h, "unscanned",
+                                          allow_manual_overwrite=False):
+            queued.append(fn)
+    started = _kick_enrich() if queued else False
+    return {"queued": queued, "count": len(queued), "started": started}
+
+
+@app.post("/api/enrichment/states")
+def api_enrichment_states(data: dict = Body(...)):
+    """Per-tile match states for the grid's VISIBLE window during a metadata
+    refresh: the client posts the filenames it is showing and gets back each
+    one's match_state (+ the song being matched right now, + whether a pass is
+    running), so a card can animate queued→working→result without a per-song
+    round-trip. Read-only — safe for demo visitors (no network, no mutation)."""
+    raw = (data or {}).get("filenames") or []
+    # Bound the batch: a visible grid window is dozens of cards; cap defensively.
+    fns = [str(f) for f in raw if isinstance(f, str)][:500]
+    return {
+        "states": meta_db.enrichment_states_for(fns),
+        "current": _enrich_status.get("current"),
+        "running": _enrich_status["running"],
+    }
+
+
+@app.post("/api/enrichment/refresh/{filename:path}")
+def api_enrichment_refresh(filename: str):
+    """The context menu's "Refresh metadata": reset THIS song's match to
+    unscanned (canonical values + candidates cleared, backoff zeroed) and
+    kick a pass so it re-matches immediately. An EXPLICIT user action, so it
+    may discard a manual pin — the automation never does, but the user
+    asking for a re-match is the one party who owns that pin."""
+    song = meta_db.enrichment_song_row(filename)
+    if not song:
+        raise HTTPException(status_code=404, detail="unknown song")
+    h = meta_db.enrichment_content_hash(
+        song["artist"], song["title"], song["album"], song["duration"])
+    meta_db.apply_enrichment_match(filename, h, "unscanned",
+                                   allow_manual_overwrite=True)
+    return {"ok": True, "started": _kick_enrich()}
 
 
 @app.get("/api/enrichment/review")
 def api_enrichment_review(limit: int = 200):
     """The Match-Review queue: songs whose text match landed in the medium-
     confidence review tier, each with its stored candidate list — the drawer
-    renders straight from this, no MusicBrainz round-trip."""
+    renders straight from this, no MusicBrainz round-trip. Ordered by the
+    user's enrich_review_order setting."""
     limit = max(1, min(int(limit), 500))
+    cfg = _load_config(CONFIG_DIR / "config.json") or {}
+    order = cfg.get("enrich_review_order", "missing_first")
     return {
-        "songs": meta_db.enrichment_review_queue(limit=limit),
+        "songs": meta_db.enrichment_review_queue(limit=limit, order=order),
         "total_review": meta_db.enrichment_state_counts().get("review", 0),
     }
 
@@ -6427,13 +8169,16 @@ def api_enrichment_pick(filename: str, data: dict = Body(...)):
 
 @app.get("/api/enrichment/search")
 def api_enrichment_search(artist: str = "", title: str = "", limit: int = 8,
-                          filename: str = ""):
+                          filename: str = "", duration: float = 0.0):
     """Manual-search proxy to MusicBrainz (throttled + identified like the
     background matcher — a user typing in the drawer must not sidestep the
     rate limit). `filename` optionally scores results against that song's
     stored identity (year/duration corroboration) instead of just the typed
-    text. Sync route on purpose: FastAPI runs it in the threadpool, so the
-    throttle's sleep never blocks the event loop."""
+    text. `duration` (seconds) lets a caller that HAS the audio but no library
+    row — e.g. the editor's create modal, which holds the master track — pass
+    its length so the studio take ranks above live/extended cuts. Sync route on
+    purpose: FastAPI runs it in the threadpool, so the throttle's sleep never
+    blocks the event loop."""
     if not (artist.strip() or title.strip()):
         raise HTTPException(status_code=400, detail="artist or title required")
     limit = max(1, min(int(limit), 25))
@@ -6447,7 +8192,105 @@ def api_enrichment_search(artist: str = "", title: str = "", limit: int = 8,
         ref = meta_db.enrichment_song_row(filename)
     if ref is None:
         ref = {"artist": artist, "title": title}
+    # A caller-supplied duration corroborates the take even without a library row.
+    if duration and duration > 0 and not ref.get("duration"):
+        ref = dict(ref)
+        ref["duration"] = duration
+    # Alias-enrich so a non-Latin-primary artist (大橋純子) ranks by its
+    # romanized alias against the typed query ("Junko Ohashi") instead of
+    # sinking to the bottom with a 0 artist score.
+    try:
+        _alias_enrich(ref, cands)
+    except EnrichTransportError:
+        pass   # aliases are a ranking nicety here; fall back to primary-name scoring
     return {"candidates": mb_match.rank_candidates(ref, cands)}
+
+
+@app.post("/api/enrichment/identify")
+async def api_enrichment_identify(request: Request):
+    """Identify a song by AUDIO FINGERPRINT (AcoustID) rather than text — the
+    reliable way to get the EXACT recording/version (the studio take, not a live
+    bootleg or an extended cut). Upload the master audio; returns candidates in
+    the same shape as /search, so the review UI and the editor's Match popup can
+    render fingerprint hits identically. 412 `needs_setup` when the user hasn't
+    opted in / has no key (the UI nudges them to Settings); 503 when it's set up
+    but the fpcalc Chromaprint binary is missing or the network is off. Async so
+    the multipart is size-capped BEFORE spooling; the blocking fpcalc subprocess
+    + AcoustID HTTP run in the threadpool via run_in_executor."""
+    gate = _acoustid_gate()
+    if gate is not None:
+        return gate
+    # Pre-parse Content-Length guard — reject an oversized body before Starlette
+    # spools the multipart to temp disk (mirrors the song-upload endpoint). The
+    # per-part cap below is the authoritative limit; this is the fast up-front no.
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            cl_int = int(cl)
+        except ValueError:
+            return JSONResponse({"error": "Invalid Content-Length header"}, status_code=400)
+        if cl_int > _ACOUSTID_MAX_UPLOAD_BYTES + _MULTIPART_OVERHEAD_SLACK:
+            return JSONResponse({"error": "audio upload too large (256 MB max)"}, status_code=413)
+    try:
+        form = await request.form(max_part_size=_ACOUSTID_MAX_UPLOAD_BYTES)
+    except Exception:
+        return JSONResponse({"error": "audio upload too large (256 MB max)"}, status_code=413)
+    file = form.get("file")
+    if not isinstance(file, UploadFile):
+        raise HTTPException(status_code=400, detail="missing file upload")
+    import tempfile
+    ext = (Path(file.filename or "").suffix or ".bin").lower()
+    tmpdir = tempfile.mkdtemp(prefix="feedback_acoustid_")
+    tmp = os.path.join(tmpdir, "audio" + ext)
+    try:
+        total = 0
+        with open(tmp, "wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _ACOUSTID_MAX_UPLOAD_BYTES:
+                    return JSONResponse(
+                        {"error": "audio upload too large (256 MB max)"}, status_code=413)
+                fh.write(chunk)
+        if total == 0:
+            raise HTTPException(status_code=400, detail="empty upload")
+        # fpcalc subprocess + AcoustID HTTP are blocking — off the event loop.
+        cands = await asyncio.get_event_loop().run_in_executor(
+            None, _identify_by_fingerprint, tmp)
+    except EnrichTransportError as e:
+        return JSONResponse({"error": "acoustid unavailable", "detail": str(e)},
+                            status_code=503)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    return {"candidates": cands}
+
+
+@app.post("/api/enrichment/identify/{filename:path}")
+def api_enrichment_identify_song(filename: str):
+    """Identify an EXISTING library song by AUDIO FINGERPRINT — the library-side
+    counterpart to /api/enrichment/identify (which takes an upload). Fingerprints
+    the song's own master audio on disk (the manual "Identify by audio" action in
+    the Fix-metadata / match-review flow). Same candidate shape as /search, so the
+    review UI renders fingerprint hits like text hits. Same 412/503 gating; 404
+    when the song has no full-mix audio to fingerprint."""
+    gate = _acoustid_gate()
+    if gate is not None:
+        return gate
+    audio = _song_audio_file(filename)
+    if not audio:
+        return JSONResponse(
+            {"error": "no audio",
+             "detail": "couldn't find this song's master audio to fingerprint "
+                       "(a stems-only pack has no full mix to identify)."},
+            status_code=404)
+    try:
+        cands = _identify_by_fingerprint(audio)
+    except EnrichTransportError as e:
+        return JSONResponse({"error": "acoustid unavailable", "detail": str(e)},
+                            status_code=503)
+    return {"candidates": cands}
 
 
 @app.get("/api/startup-status")
@@ -6948,6 +8791,14 @@ def delete_song(filename: str):
             meta_db.conn.execute("DELETE FROM song_enrichment WHERE filename = ?", (cache_key,))
             meta_db.conn.commit()
 
+        # User art overrides go with the song (CAA cache files are keyed by
+        # RELEASE and may be shared with other charts — the LRU owns those).
+        for _p in _art_override_paths(cache_key):
+            try:
+                _p.unlink()
+            except OSError:
+                pass
+
         _invalidate_song_caches(cache_key)
 
     log.info("Deleted song %s", cache_key)
@@ -7090,6 +8941,10 @@ async def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "
     # The cursor to resume after this page (effective sort folds in dir=desc).
     next_cursor = (next_library_cursor(_effective_keyset_sort(sort, dir), songs[-1])
                    if (is_local and songs) else None)
+    # Drop the private raw-title stash query_page attached for the cursor — it's
+    # an internal keyset detail, not part of the card payload.
+    for s in songs:
+        s.pop("_sort_title", None)
     return {"songs": songs, "total": total, "page": page, "size": size,
             "next_cursor": next_cursor}
 
@@ -7154,6 +9009,79 @@ def api_get_chart_work(filename: str):
     return meta_db.chart_work(filename)
 
 
+@app.get("/api/chart/{filename:path}/fileinfo")
+def api_chart_fileinfo(filename: str):
+    """The context menu's "Get info": where the file lives + what the pack
+    contains. Under /api/chart — the GET /api/song/{path} catch-all would
+    swallow a /api/song/…/fileinfo suffix. Read-only; demo-mode blocks it
+    because it exposes filesystem paths."""
+    dlc = _get_dlc_dir()
+    if not dlc:
+        raise HTTPException(status_code=404, detail="not configured")
+    p = _resolve_dlc_path(dlc, filename)
+    if p is None:
+        raise HTTPException(status_code=403, detail="forbidden")
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    # Restrict to actual charts — sloppak or loose song. Without this the route
+    # would stat ANY file the user happens to keep under DLC_DIR (e.g. notes),
+    # leaking its path/size; the app only recognises these two song formats.
+    is_pak = sloppak_mod.is_sloppak(p)
+    is_loose = loosefolder_mod.is_loose_song(p)
+    if not (is_pak or is_loose):
+        raise HTTPException(status_code=404, detail="not a chart")
+    st = p.stat()
+    info = {
+        "filename": filename,
+        "path": str(p),
+        "folder": str(p.parent),
+        "format": "sloppak" if is_pak else "loose",
+        # Directory-form songs report the tree's total (covers loose folders
+        # and dir-form paks); zip-form paks report the archive size. Symlinked
+        # entries are skipped so a link inside the folder can't pull in — or
+        # leak the size of — a file outside it.
+        "size": (st.st_size if p.is_file()
+                 else sum(f.stat().st_size for f in p.rglob("*")
+                          if f.is_file() and not f.is_symlink())),
+        "mtime": st.st_mtime,
+    }
+    if is_pak:
+        try:
+            m = sloppak_mod.load_manifest(p) or {}
+        except Exception:
+            m = {}
+        arrs = [str(a.get("name", a.get("id", ""))) for a in (m.get("arrangements") or [])
+                if isinstance(a, dict)]
+        stems = [str(s.get("id", "")) for s in (m.get("stems") or []) if isinstance(s, dict)]
+        try:
+            has_cover = sloppak_mod.read_cover_bytes(p, m) is not None
+        except Exception:
+            has_cover = False
+        # The optional identity/catalog keys, listed only when present — the
+        # Get-info panel's "what this pack carries vs what's missing" readout.
+        identity = {k: m.get(k) for k in
+                    ("mbid", "isrc", "genres", "track", "disc", "album_artist",
+                     "feedpak_version", "language")
+                    if m.get(k) not in (None, "", [])}
+        info["manifest"] = {
+            "title": str(m.get("title", "")), "artist": str(m.get("artist", "")),
+            "album": str(m.get("album", "")), "year": str(m.get("year", "") or ""),
+            "arrangements": arrs, "stems": stems,
+            "has_cover": has_cover, "has_lyrics": bool(m.get("lyrics")),
+            "authors": [a.get("name", "") if isinstance(a, dict) else str(a)
+                        for a in (m.get("authors") or [])],
+            "identity": identity,
+        }
+    # The enrichment verdict, so Get info can say "Matched (auto, 96%)" /
+    # "Pinned by you" / "Not matched" alongside the file facts.
+    row = meta_db.get_enrichment(filename)
+    if row:
+        info["match"] = {k: row.get(k) for k in
+                         ("match_state", "match_source", "match_score",
+                          "canon_artist", "canon_title", "canon_album", "canon_year")}
+    return info
+
+
 @app.get("/api/library/albums")
 async def list_library_albums(q: str = "", page: int = 0, size: int = 120,
                               favorites: int = 0, format: str = "",
@@ -7161,6 +9089,7 @@ async def list_library_albums(q: str = "", page: int = 0, size: int = 120,
                               arrangements_has: str = "", arrangements_lacks: str = "",
                               stems_has: str = "", stems_lacks: str = "",
                               has_lyrics: str = "", tunings: str = "", mastery: str = "",
+                              match: str = "", genre: str = "",
                               provider: str = "local"):
     """Album-condensed browse: distinct (artist, album) groups with a track count
     and a representative cover song. Paged by album. Same filters as /api/library."""
@@ -7170,6 +9099,7 @@ async def list_library_albums(q: str = "", page: int = 0, size: int = 120,
     albums, total = await _call_library_provider_async(
         library_provider, "query_albums",
         page=page, size=size, mastery=_split_csv(mastery),
+        match_states=_split_csv(match), genre=_split_csv(genre),
         **_library_filter_args(
             q=q, favorites=favorites, format=format, artist=artist, album=album,
             arrangements_has=arrangements_has, arrangements_lacks=arrangements_lacks,
@@ -7266,9 +9196,10 @@ def library_genres(provider: str = "local"):
     if is_remote:
         return {"genres": []}
     with meta_db._lock:
+        g = meta_db._effective_genre_expr()
         rows = meta_db.conn.execute(
-            "SELECT DISTINCT genre FROM songs WHERE genre IS NOT NULL AND genre != '' "
-            "ORDER BY genre COLLATE NOCASE"
+            f"SELECT g FROM (SELECT DISTINCT ({g}) AS g FROM songs) "
+            "WHERE g IS NOT NULL AND g != '' ORDER BY g COLLATE NOCASE"
         ).fetchall()
     return {"genres": [r[0] for r in rows]}
 
@@ -7351,6 +9282,60 @@ def put_song_user_meta(filename: str, data: dict):
     if tags != "__absent__":
         meta_db.set_song_tags(key, tags)
     return meta_db.get_song_user_meta(key)
+
+
+# Catalog fields the Fix-metadata popup may override/lock — the intersection of
+# "displayable identity" and "safe to correct locally". Guitar/practice facts
+# and personal fields are never overrides.
+_OVERRIDE_FIELDS = frozenset({"title", "artist", "album", "year", "genre"})
+
+
+@app.get("/api/song/{filename:path}/overrides")
+def get_song_overrides(filename: str):
+    """Per-field metadata overrides + locks for one song (Fix-metadata popup):
+    {"overrides": {field: {"value": str|null, "locked": bool}},
+     "pack": {field: str}}. `pack` is the stored value each override sits on top
+    of — the popup's Details tab renders it as the revert-to-pack reference and
+    the Yours/Pack provenance."""
+    key = meta_db._canonical_song_filename(filename)
+    return {"overrides": meta_db.get_song_overrides(key),
+            "pack": meta_db.pack_fields(key)}
+
+
+@app.put("/api/song/{filename:path}/overrides")
+def put_song_overrides(filename: str, data: dict):
+    """Set/clear per-field overrides + locks. Body:
+    `{"overrides": {field: {"value": str|null, "locked": bool}}}`. Only catalog
+    fields (title/artist/album/year/genre) are accepted. A field left with no
+    value and unlocked is removed. Returns the merged override map.
+
+    Clearing rides this PUT (send value:null, locked:false) rather than a DELETE
+    sub-route, because `DELETE /api/song/{filename:path}` already owns every
+    DELETE under /api/song and would shadow it (same reason as tags)."""
+    ov = (data or {}).get("overrides")
+    if not isinstance(ov, dict) or not ov:
+        return JSONResponse({"error": "overrides must be a non-empty object"}, 400)
+    bad = sorted(f for f in ov if f not in _OVERRIDE_FIELDS)
+    if bad:
+        return JSONResponse({"error": "unknown field(s): " + ", ".join(bad)}, 400)
+    key = meta_db._canonical_song_filename(filename)
+    for field, spec in ov.items():
+        if not isinstance(spec, dict):
+            return JSONResponse({"error": f"'{field}' must be an object with value/locked"}, 400)
+        kwargs: dict = {}
+        if "value" in spec:
+            v = spec["value"]
+            if v is None:
+                kwargs["value"] = None
+            elif isinstance(v, (str, int, float)) and not isinstance(v, bool):
+                kwargs["value"] = str(v).strip()[:500]
+            else:
+                return JSONResponse({"error": f"'{field}' value must be a string or null"}, 400)
+        if "locked" in spec:
+            kwargs["locked"] = bool(spec["locked"])
+        if kwargs:
+            meta_db.set_song_override(key, field, **kwargs)
+    return {"overrides": meta_db.get_song_overrides(key)}
 
 
 @app.post("/api/songs/user-meta/batch")
@@ -7461,6 +9446,120 @@ def delete_artist_alias(raw_name: str):
     """Remove one override so that raw artist stands on its own again."""
     meta_db.remove_artist_alias(raw_name)
     return {"ok": True}
+
+
+# ── Artist pages (launch charrette PR-B) ──────────────────────────────────────
+# GET page = 100% local (renders offline, renders unmatched); GET links = the
+# ONE lazy MusicBrainz artist lookup, cached forever in artist_enrichment and
+# re-fetched only by the explicit refresh. Both links routes are demo-blocked
+# (they store server state + spend the shared MB rate limit).
+
+# MB artist url-relation types → the page's link slots (locked position 4:
+# whitelist only, links-only forever). Everything not listed is dropped.
+_ARTIST_URL_REL_SLOTS = {
+    "official homepage": "official",
+    "setlistfm": "tour",
+    "concerts": "tour",
+    "youtube": "video",
+    "video channel": "video",
+    "social network": "social",
+    "bandcamp": "social",
+    "soundcloud": "social",
+    "wikipedia": "wikipedia",
+    "wikidata": "wikipedia",
+}
+
+
+def _artist_links_from_mb(body: dict) -> tuple[dict, list]:
+    """Whitelist an MB artist doc's url-relations into the page's link slots:
+    {official, tour, video, social: [...], wikipedia}. Every URL passes the
+    same http(s)-scheme gate as art redirects (_safe_art_redirect_url) so a
+    hostile javascript:/data:/file: resource can never reach an href. First
+    URL wins per single slot; social collects up to 5; wikipedia is preferred
+    over wikidata when both exist. Also returns MB's genre names (capped)."""
+    links: dict = {}
+    social: list = []
+    wikidata_url = None
+    for rel in (body or {}).get("relations") or []:
+        if not isinstance(rel, dict):
+            continue
+        rtype = str(rel.get("type") or "").strip().lower()
+        slot = _ARTIST_URL_REL_SLOTS.get(rtype)
+        if not slot:
+            continue
+        url = rel.get("url")
+        url = url.get("resource") if isinstance(url, dict) else url
+        if _safe_art_redirect_url(url) is None:
+            continue
+        if slot == "social":
+            if url not in social and len(social) < 5:
+                social.append(url)
+        elif rtype == "wikidata":
+            wikidata_url = wikidata_url or url
+        elif slot not in links:
+            links[slot] = url
+    if social:
+        links["social"] = social
+    if "wikipedia" not in links and wikidata_url:
+        links["wikipedia"] = wikidata_url
+    genres = [str(g.get("name")) for g in (body or {}).get("genres") or []
+              if isinstance(g, dict) and g.get("name")]
+    return links, genres[:8]
+
+
+def _artist_links_payload(name: str, force: bool = False) -> dict:
+    """Shared by GET links + POST refresh. Order of gates: the user's opt-in
+    setting (external links are OFF by default — the dev-chat thread's call),
+    then a known mb_artist_id (no id → nothing to look up), then the cache
+    (unless force), then the offline guard, then ONE throttled fetch."""
+    cfg = _load_config(CONFIG_DIR / "config.json") or _default_settings()
+    if cfg.get("artist_external_links") is not True:
+        return {"links": {}, "matched": False, "disabled": True}
+    canonical = meta_db._terminal_canonical((name or "").strip())
+    mbid = meta_db.artist_known_mb_id(meta_db._raw_variants_for(canonical))
+    mbid = (mbid or "").strip().lower()
+    # The id is interpolated into the MB request path — same strict-shape rule
+    # as the manifest identity keys (_MBID_RE), so a junk/hostile value stored
+    # via a hand-rolled /pick body can never reach the request line.
+    if not mbid or not _MBID_RE.match(mbid):
+        return {"links": {}, "matched": False}
+    if not force:
+        cached = meta_db.get_artist_enrichment(mbid)
+        if cached:
+            return {"links": cached["url_rels"], "genres": cached["genres"],
+                    "matched": True, "cached": True, "mb_artist_id": mbid}
+    if not _enrich_network_enabled():
+        return {"links": {}, "matched": True, "offline": True, "mb_artist_id": mbid}
+    try:
+        body = _mb_http_get(f"artist/{mbid}", {"inc": "url-rels+genres+tags"})
+    except EnrichTransportError:
+        return {"links": {}, "matched": True, "offline": True, "mb_artist_id": mbid}
+    links, genres = _artist_links_from_mb(body or {})
+    meta_db.put_artist_enrichment(mbid, links, genres)
+    return {"links": links, "genres": genres, "matched": True, "cached": False,
+            "mb_artist_id": mbid}
+
+
+@app.get("/api/artist/{name:path}/page")
+def api_artist_page(name: str):
+    """The artist page's all-LOCAL payload — counts, albums, aliases, similar-
+    in-library, mosaic art, play-all seed. Never touches the network; an
+    unmatched or even unknown artist still returns a functional page."""
+    return meta_db.artist_page(name)
+
+
+@app.get("/api/artist/{name:path}/links")
+def api_artist_links(name: str):
+    """External links for a matched artist — cached after the first call.
+    Sync route on purpose (like /api/enrichment/search): FastAPI runs it in
+    the threadpool so the MB throttle's sleep never blocks the event loop."""
+    return _artist_links_payload(name)
+
+
+@app.post("/api/artist/{name:path}/links/refresh")
+def api_artist_links_refresh(name: str):
+    """Explicit re-fetch of the cached links (the page's manual Refresh)."""
+    return _artist_links_payload(name, force=True)
 
 
 # ── Player profile / unified XP / streak (fee[dB]ack v0.3.0) ──────────────────
@@ -8575,6 +10674,41 @@ def _default_settings():
         # review" option) sends every text match to review.
         "enrich_enabled": True,
         "enrich_auto_threshold": 0.9,
+        # Scraper options (R1). Two axes, media-server style: sources say WHO
+        # may be contacted (MusicBrainz = the matcher, Cover Art Archive = the
+        # art fetch); the apply toggles say WHICH fields an AUTOMATIC match may
+        # canonicalize. A match the user confirms in the review modal always
+        # applies in full — these gate only what happens without them. All of
+        # it is display-side cache; nothing here ever writes to a pack file.
+        "enrich_src_musicbrainz": True,
+        "enrich_src_caa": True,
+        "enrich_apply_names": True,
+        "enrich_apply_year": True,
+        "enrich_apply_genres": True,
+        "enrich_apply_art": True,
+        # Review-queue ordering: missing_first = charts lacking album/year
+        # surface first (they gain the most), artist = A–Z, recent = newest
+        # files first.
+        "enrich_review_order": "missing_first",
+        # Artist pages (PR-B). The page itself is 100% local (renders from
+        # your own library rows), so it defaults ON; the external-links row
+        # (official site / tour dates / videos / social, one throttled
+        # MusicBrainz artist lookup per matched artist) is opt-IN — default
+        # OFF per the dev-chat thread. Links are links-only forever: always
+        # the external browser, never media delivered in-app.
+        "artist_pages_enabled": True,
+        "artist_external_links": False,
+        # Audio fingerprinting (AcoustID + Chromaprint). OPT-IN, default OFF.
+        # Text matching (MusicBrainz) can't reliably pick the exact recording
+        # for a song with many comp/live/reissue takes (especially a
+        # non-title-track — the title can't find the album); fingerprinting
+        # reads the audio itself and resolves the EXACT recording. Needs the
+        # user's own free AcoustID application key
+        # (https://acoustid.org/new-application) plus the `fpcalc` binary. The
+        # key lives here (settings) — not only an env var — so a user can set it
+        # themselves in the UI; $ACOUSTID_API_KEY stays a server-wide fallback.
+        "acoustid_enabled": False,
+        "acoustid_api_key": "",
     }
 
 
@@ -8613,7 +10747,7 @@ def get_tunings():
 @app.get("/api/settings")
 def get_settings():
     cfg = _load_config(CONFIG_DIR / "config.json")
-    return cfg if cfg is not None else _default_settings()
+    return settings_with_instrument_profiles(cfg if cfg is not None else _default_settings())
 
 
 @app.post("/api/settings")
@@ -8745,6 +10879,34 @@ def save_settings(data: dict):
             if not math.isfinite(t) or not (0.5 <= t <= 1.01):
                 return {"error": "enrich_auto_threshold must be a number between 0.5 and 1.01"}
             updates["enrich_auto_threshold"] = t
+    for _bool_key in ("enrich_src_musicbrainz", "enrich_src_caa",
+                      "enrich_apply_names", "enrich_apply_year",
+                      "enrich_apply_genres", "enrich_apply_art",
+                      # Artist pages (PR-B): page on/off + external-links opt-in.
+                      "artist_pages_enabled", "artist_external_links",
+                      # AcoustID audio-fingerprinting opt-in (default off).
+                      "acoustid_enabled"):
+        if _bool_key in data:
+            raw = data[_bool_key]
+            if raw is not None:
+                if not isinstance(raw, bool):
+                    return {"error": f"{_bool_key} must be a boolean"}
+                updates[_bool_key] = raw
+    if "acoustid_api_key" in data:
+        # Free AcoustID application key (opaque token). null is a no-op, empty
+        # string clears; length-capped so a bad POST can't bloat config.json.
+        # Never logged. The matcher trims + validates presence at read time.
+        raw = data["acoustid_api_key"]
+        if raw is not None:
+            if not isinstance(raw, str) or len(raw) > 128:
+                return {"error": "acoustid_api_key must be a string (at most 128 chars)"}
+            updates["acoustid_api_key"] = raw.strip()
+    if "enrich_review_order" in data:
+        raw = data["enrich_review_order"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in ("missing_first", "artist", "recent"):
+                return {"error": "enrich_review_order must be one of missing_first, artist, recent"}
+            updates["enrich_review_order"] = raw
     if "miss_penalty" in data:
         raw = data["miss_penalty"]
         if raw is not None:
@@ -8807,6 +10969,38 @@ def save_settings(data: dict):
             else:
                 return {"error": "tuning must be a name (string) or a list of semitone offsets"}
 
+    if "pathway" in data:
+        raw = data["pathway"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in PROFILE_PATHWAYS:
+                return {"error": "pathway must be one of songs, practice, learn, studio"}
+            updates["pathway"] = raw
+
+    _profile_patch = None
+    if "instrument_profiles" in data:
+        raw = data["instrument_profiles"]
+        if raw is not None:
+            if not isinstance(raw, dict):
+                return {"error": "instrument_profiles must be an object"}
+            # Validate each PROVIDED profile individually and keep the patch
+            # PARTIAL — /api/settings is a partial-merge endpoint, so updating one
+            # profile must NOT reset the others to defaults. Merged over the
+            # persisted profiles inside the lock below (not via the wholesale
+            # `updates` merge, which would clobber the unspecified ones).
+            _profile_patch = {}
+            for _pid, _praw in raw.items():
+                if _pid not in PROFILE_IDS:
+                    return {"error": f"unknown instrument profile: {_pid}"}
+                _prof, _perr = normalize_instrument_profile(_pid, _praw)
+                if _perr:
+                    return {"error": _perr}
+                _profile_patch[_pid] = _prof
+    if "active_instrument_profile" in data:
+        raw = data["active_instrument_profile"]
+        if raw is not None:
+            if not isinstance(raw, str) or raw not in PROFILE_IDS:
+                return {"error": "active_instrument_profile must be one of guitar-lead, guitar-rhythm, bass"}
+            updates["active_instrument_profile"] = raw
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     # Critical section — the read-merge-write must be atomic. FastAPI runs
     # sync handlers in a threadpool, so two concurrent partial POSTs (e.g.
@@ -8823,6 +11017,29 @@ def save_settings(data: dict):
         if cfg is None:
             cfg = _default_settings()
         cfg.update(updates)
+        if _profile_patch is not None:
+            # Merge the validated partial over the persisted profiles so a
+            # single-profile update leaves the others intact (a fresh config
+            # falls back to the built-in defaults for the unspecified ones).
+            _existing, _ = normalize_instrument_profiles(cfg.get("instrument_profiles"))
+            if _existing is None:
+                _existing = {}
+            _existing.update(_profile_patch)
+            cfg["instrument_profiles"] = _existing
+        # Only canonicalize/persist the instrument profiles when this save
+        # actually touches them (or the config already carries them). GET always
+        # virtualizes profiles via settings_with_instrument_profiles, so a save
+        # that doesn't touch instrument settings must stay a plain partial merge
+        # — otherwise an empty (or unrelated) POST would freeze the default
+        # profiles into the on-disk config.
+        _profile_keys = ("instrument", "string_count", "tuning", "reference_pitch",
+                         "pathway", "instrument_profiles", "active_instrument_profile")
+        if "instrument_profiles" in cfg or any(k in updates for k in _profile_keys):
+            try:
+                cfg = apply_flat_instrument_patch_to_profiles(cfg, updates)
+            except ValueError as exc:
+                return {"error": str(exc)}
+            cfg = settings_with_instrument_profiles(cfg)
         _atomic_write_file(config_file, json.dumps(cfg, indent=2).encode("utf-8"))
     return {"message": ". ".join(messages) if messages else "Settings saved"}
 
@@ -8834,7 +11051,8 @@ def save_settings(data: dict):
 _RESETTABLE_SETTINGS_KEYS = frozenset({
     "default_arrangement", "demucs_server_url", "master_difficulty",
     "av_offset_ms", "countdown_before_song", "miss_penalty", "fail_behavior",
-    "reference_pitch", "instrument", "string_count", "tuning",
+    "reference_pitch", "instrument", "string_count", "tuning", "pathway",
+    "instrument_profiles", "active_instrument_profile",
     "achievements_enabled", "use_amp_sims",
 })
 
@@ -8859,6 +11077,16 @@ def reset_settings(data: dict):
         removed = [k for k in keys if k in cfg]
         for k in removed:
             del cfg[k]
+        # `pathway` is mirrored into every instrument profile, so deleting the
+        # flat key alone doesn't reset it — GET re-derives the value from the
+        # active profile. Reset it inside the persisted profiles too (back to the
+        # "songs" default), without disturbing the rest of the instrument config.
+        if "pathway" in keys and isinstance(cfg.get("instrument_profiles"), dict):
+            for prof in cfg["instrument_profiles"].values():
+                if isinstance(prof, dict):
+                    prof["pathway"] = "songs"
+            if "pathway" not in removed:
+                removed.append("pathway")
         _atomic_write_file(config_file, json.dumps(cfg, indent=2).encode("utf-8"))
     return {"message": "Settings reset", "reset": removed}
 
@@ -8950,6 +11178,18 @@ def _validate_server_config_types(cfg: dict) -> str | None:
                     return "server_config.tuning offsets must be ≤8 integers between -12 and 12"
             else:
                 return "server_config.tuning must be a name (string) or a list of semitone offsets"
+    if "pathway" in cfg:
+        v = cfg["pathway"]
+        if v is not None and (not isinstance(v, str) or v not in PROFILE_PATHWAYS):
+            return "server_config.pathway must be one of songs, practice, learn, studio"
+    if "instrument_profiles" in cfg:
+        profiles, error = normalize_instrument_profiles(cfg["instrument_profiles"])
+        if error:
+            return f"server_config.{error}"
+    if "active_instrument_profile" in cfg:
+        v = cfg["active_instrument_profile"]
+        if v is not None and (not isinstance(v, str) or v not in PROFILE_IDS):
+            return "server_config.active_instrument_profile must be one of guitar-lead, guitar-rhythm, bass"
     return None
 
 
@@ -9319,6 +11559,7 @@ def export_settings():
     server_config = _load_config(config_file)
     if server_config is None:
         server_config = _default_settings()
+    server_config = settings_with_instrument_profiles(server_config)
 
     # Snapshot the library DB + custom art FIRST: if the irreplaceable state
     # can't be captured, abort with an error rather than hand back a bundle
@@ -9561,7 +11802,7 @@ def import_settings(bundle: dict):
         with _settings_lock:
             _atomic_write_file(
                 CONFIG_DIR / "config.json",
-                json.dumps(server_config, indent=2).encode("utf-8"),
+                json.dumps(settings_with_instrument_profiles(server_config), indent=2).encode("utf-8"),
             )
     except OSError as e:
         # Phase-1 validation should have caught all foreseeable
@@ -9937,15 +12178,23 @@ def _file_art_response(path: Path, media_type: str, request: Request | None):
 
 
 @app.get("/api/song/{filename:path}/art")
-async def get_song_art(filename: str, request: Request = None):
-    """Serve album art for a song.
+async def get_song_art(filename: str, request: Request = None, source: str = ""):
+    """Serve album art for a song, walking the R3 override chain:
 
-    Dispatches by format and returns the appropriate media type:
-      - Sloppak: serves `cover.jpg` (or manifest-declared cover) read directly
-        from the package (the single cover member for zip-form sloppaks — no
-        full unpack) as JPEG/PNG/WebP.
-      - Loose folder: serves the discovered art file directly as
-        JPEG/PNG/WebP.
+      1. USER OVERRIDE (upload / URL-fetch, {safe_name}.gif|.png in the art
+         cache) — art the user explicitly pinned outranks everything, pack
+         art included. GIF is allowed HERE only: an animated cover is a
+         local-only bonus; packs stay jpg/png/webp and nothing ever writes
+         art into a pack file.
+      2. PACK ART — sloppak cover (single member read, no full unpack) or
+         the loose folder's discovered image.
+      3. COVER ART ARCHIVE cache — fetched by the enrichment art worker for
+         matched songs that lack pack art, keyed by release MBID.
+
+    `?source=pack` narrows the chain to step 2 only (no override, no CAA):
+    the cover picker's "Pack original" tile must show the pack's own art
+    even while a user override is what the plain route serves. 404 when the
+    song ships no art of its own.
     """
     dlc = _get_dlc_dir()
     if not dlc:
@@ -9957,7 +12206,15 @@ async def get_song_art(filename: str, request: Request = None):
     if not song_path.exists():
         return JSONResponse({"error": "not found"}, 404)
 
-    # Sloppak path: read the cover (manifest-declared or default) straight from
+    pack_only = source == "pack"
+
+    # 1. User override — GIF first (it wins over a stale PNG override).
+    if not pack_only:
+        for cached in _art_override_paths(filename):
+            mt = "image/gif" if cached.suffix == ".gif" else "image/png"
+            return _file_art_response(cached, mt, request)
+
+    # 2a. Sloppak: read the cover (manifest-declared or default) straight from
     # the package. For a zip-form sloppak this opens just the cover member —
     # NOT the whole archive — so the library grid never triggers a full unpack
     # of stems just to paint a thumbnail.
@@ -9972,18 +12229,17 @@ async def get_song_art(filename: str, request: Request = None):
             art = await asyncio.to_thread(sloppak_mod.read_cover_bytes, song_path)
         except Exception:
             art = None
-        if art is None:
-            return JSONResponse({"error": "no art"}, 404)
-        data, mt = art
-        etag = f'"{hashlib.sha1(data).hexdigest()}"'
-        headers, not_modified = _art_conditional(etag, request)
-        if not_modified:
-            return Response(status_code=304, headers=headers)
-        return Response(content=data, media_type=mt, headers=headers)
+        if art is not None:
+            data, mt = art
+            etag = f'"{hashlib.sha1(data).hexdigest()}"'
+            headers, not_modified = _art_conditional(etag, request)
+            if not_modified:
+                return Response(status_code=304, headers=headers)
+            return Response(content=data, media_type=mt, headers=headers)
 
-    # Loose folder path: serve art file directly.
+    # 2b. Loose folder: serve the discovered art file directly.
     # song_path is already validated against DLC_DIR by _resolve_dlc_path.
-    if loosefolder_mod.is_loose_song(song_path):
+    elif loosefolder_mod.is_loose_song(song_path):
         art_path = loosefolder_mod.find_art(song_path)
         if art_path:
             # Re-resolve in case the matched file is a symlink — a crafted
@@ -10000,17 +12256,150 @@ async def get_song_art(filename: str, request: Request = None):
                     ".png": "image/png", ".webp": "image/webp",
                 }.get(art_resolved.suffix.lower(), "image/jpeg")
                 return _file_art_response(art_resolved, mt, request)
-        return JSONResponse({"error": "no art"}, 404)
 
-    # Custom art uploaded via /art/upload is cached as PNG under ART_CACHE_DIR;
-    # serve it if present (works for any song the user pinned art to).
-    art_cache = ART_CACHE_DIR
-    safe_name = filename.replace("/", "_").replace(" ", "_")
-    cached = art_cache / f"{safe_name}.png"
-    if cached.exists():
-        return _file_art_response(cached, "image/png", request)
+    # 3. Cover Art Archive cache (the enrichment art worker's fetch).
+    if not pack_only:
+        row = meta_db.get_enrichment(filename)
+        if row and row.get("art_state") == "caa" and row.get("art_cache_path"):
+            caa = Path(row["art_cache_path"])
+            if caa.is_file():
+                return _file_art_response(caa, "image/jpeg", request)
 
     return JSONResponse({"error": "no art"}, 404)
+
+
+# ── Cover picker (PR-C): candidate assembly ───────────────────────────────────
+# Enumerated ON OPEN, never at scan time (charrette §8), and NO image bytes
+# are fetched here — Cover Art Archive release INDEX jsons only (1-3 throttled
+# calls on a cache miss); the tiles' thumbnails load straight from the archive
+# in the client. Applying a pick never grows a new write path: the client
+# POSTs the chosen thumb URL to the EXISTING …/art/url route (the override
+# lane — never evicted, survives a re-match), "Pack original" DELETEs the
+# override, uploads keep the existing upload route.
+_ART_PICKER_MAX_CAA = 12
+
+
+@app.get("/api/song/{filename:path}/art/cover-search")
+def api_art_cover_search(filename: str, q: str = ""):
+    """Search Cover Art Archive (via MusicBrainz release-groups) for album covers
+    — powers the Change-cover picker's search box, so a cover can be found even
+    for a song with no metadata match (the unmatched city-pop pile, where
+    /art/candidates is empty). `q` defaults to the song's own artist + album/
+    title (romaji fallback applied). Read-only; the picker renders the thumbs and
+    applies a pick through the existing /art/url route."""
+    query = (q or "").strip()
+    if not query:
+        pack = meta_db.pack_fields(meta_db._canonical_song_filename(filename))
+        query = " ".join(x for x in (pack.get("artist"), pack.get("album") or pack.get("title")) if x).strip()
+    if not query:
+        return {"query": "", "covers": []}
+    try:
+        return {"query": query, "covers": _mb_search_release_groups(query, limit=8)}
+    except EnrichTransportError:
+        return {"query": query, "covers": [], "error": "unavailable"}
+
+
+@app.get("/api/song/{filename:path}/art/candidates")
+def get_song_art_candidates(filename: str):
+    """Everything the cover picker can offer for one song, without fetching a
+    single image: the current cover (with its provenance), the pack original
+    when the song ships art, and CAA candidates for the matched/manual
+    release plus any distinct releases among the stored review candidates.
+    Sync route on purpose (the CAA index fetch sleeps in the shared
+    throttle — FastAPI runs `def` routes in the threadpool). One response,
+    `pending` always False — the client shows a spinner for the request's own
+    latency; offline / CAA-down just means an empty caa tail (the instant
+    tiles keep working), never an error."""
+    from urllib.parse import quote
+    dlc = _get_dlc_dir()
+    song_path = _resolve_dlc_path(dlc, filename) if dlc else None
+    if song_path is None or not song_path.exists():
+        raise HTTPException(status_code=404, detail="unknown song")
+
+    row = meta_db.get_enrichment(filename) or {}
+    has_pack = _song_pack_art_exists(filename)
+    art_url = f"/api/song/{quote(filename)}/art"
+
+    # What the plain art route would serve right now — the serve chain's
+    # order (override > pack > CAA cache) restated as provenance.
+    if _art_override_paths(filename):
+        provenance = "yours"
+    elif has_pack:
+        provenance = "pack"
+    elif row.get("art_state") == "caa" and row.get("art_cache_path"):
+        provenance = "matched"
+    else:
+        provenance = "none"
+
+    candidates: list[dict] = [{
+        "id": "current", "kind": "current", "label": "Current",
+        "thumb_url": art_url, "provenance": provenance,
+    }]
+    if has_pack:
+        candidates.append({
+            "id": "pack", "kind": "pack", "label": "Pack original",
+            "thumb_url": art_url + "?source=pack", "provenance": "pack",
+        })
+
+    # Releases worth asking the archive about: the matched/manual release
+    # first (it seeds the best candidates), then any distinct release among
+    # the stored review candidates (a review row has no mb_release_id of its
+    # own — its releases live in the candidates JSON).
+    # Only spend the shared CAA rate budget on rows whose match warrants it:
+    # a matched/manual release seeds the best candidates, and a review row's
+    # stored candidates are still live proposals. A failed/rejected (or
+    # unscanned) row has no accepted match — asking would burn the budget and
+    # surface releases already rejected as non-matches. The Current + Pack
+    # tiles above serve regardless, so those songs still get a picker.
+    rids: list[str] = []
+    if row.get("match_state") in ("matched", "manual", "review"):
+        if row.get("match_state") in ("matched", "manual") and row.get("mb_release_id"):
+            rids.append(str(row["mb_release_id"]))
+        for cand in (row.get("candidates") or []):
+            rid = str(cand.get("release_id") or "") if isinstance(cand, dict) else ""
+            if rid and rid not in rids:
+                rids.append(rid)
+
+    caa_entries: list[dict] = []
+    for rid in rids:
+        if len(caa_entries) >= _ART_PICKER_MAX_CAA:
+            break
+        try:
+            imgs = _caa_index_cached(rid)
+        except EnrichTransportError:
+            # Offline / archive down — stop asking (each further miss would
+            # only burn a timeout). The instant tiles still serve; a later
+            # picker-open retries naturally (failures are never cached).
+            break
+        # Front covers first, approved before pending, otherwise index order
+        # (the picker grammar is a RANKED list — §7/§9).
+        def _rank(img):
+            types = img.get("types") or []
+            is_front = bool(img.get("front")) or "Front" in types
+            return (not is_front, not bool(img.get("approved")))
+        for img in sorted((i for i in imgs if isinstance(i, dict)), key=_rank):
+            if len(caa_entries) >= _ART_PICKER_MAX_CAA:
+                break
+            thumbs = img.get("thumbnails") or {}
+            if not isinstance(thumbs, dict):
+                continue
+            thumb = (thumbs.get("500") or thumbs.get("large")
+                     or thumbs.get("250") or thumbs.get("small"))
+            if not thumb:
+                continue
+            types = [str(t) for t in (img.get("types") or []) if isinstance(t, str)]
+            caa_entries.append({
+                "id": f"caa-{rid}-{img.get('id', '')}",
+                "kind": "caa",
+                "label": ", ".join(types) or "Cover",
+                "thumb_url": str(thumb),
+                "provenance": "matched",
+                "types": types,
+                "approved": bool(img.get("approved")),
+                "release_id": rid,
+            })
+
+    return {"candidates": candidates + caa_entries, "pending": False}
 
 
 @app.post("/api/song/{filename:path}/meta")
@@ -10098,10 +12487,208 @@ def update_song_meta(filename: str, data: dict):
     return {"ok": True, "persisted": persisted}
 
 
+# ── Gap-fill: write CONFIRMED missing metadata into the pack (R4a) ────────────
+# The agreed write-back contract (spec-alignment §7): opt-in + user-initiated
+# (nothing here runs in the background), adds ABSENT keys only (never replaces
+# an author-set value — the writer refuses, and existing manifest bytes are
+# preserved verbatim by appending), spec'd-keys allowlist, values only from a
+# CONFIRMED identity (an auto/exact match or a user pin — review-tier rows are
+# not eligible until a human confirms), atomic write + .bak. Single-song only;
+# batch write-back stays an open question with the spec chair.
+_GAP_FILL_KEYS = ("album", "year", "genres", "mbid", "isrc")
+
+
+def _gap_fill_manifest_absent(manifest: dict, key: str) -> bool:
+    """A key is a GAP only when it's genuinely MISSING from the manifest.
+
+    Gap-fill is append-only: the writer's never-clobber guard raises on ANY
+    key already present, and appending a second `album:` line to a manifest
+    that already carries `album: ''` would just create a duplicate YAML key.
+    So a present-but-empty value (None / '' / [] / year 0) is NOT a gap the
+    append-only writer can fill — offering it in the preview would only lead
+    to a POST the writer refuses. Present-but-empty keys are therefore left
+    to the metadata editor (which re-serializes and can replace in place)."""
+    return key not in manifest
+
+
+def _gap_fill_proposals(cache_key: str, resolved) -> tuple[dict, str]:
+    """What gap-fill could add for this song: (proposals, reason). Empty
+    proposals explain themselves via reason — 'not-sloppak', 'no-match'
+    (nothing confirmed yet), 'review' (a human hasn't confirmed the match),
+    or 'nothing-missing'."""
+    if resolved is None or not resolved.exists() or not sloppak_mod.is_sloppak(resolved):
+        return {}, "not-sloppak"
+    row = meta_db.get_enrichment(cache_key)
+    if not row or row.get("match_state") not in ("matched", "manual"):
+        state = (row or {}).get("match_state")
+        return {}, ("review" if state == "review" else "no-match")
+    try:
+        manifest = sloppak_mod.load_manifest(resolved) or {}
+    except Exception:
+        return {}, "not-sloppak"
+    # A LOCKED field (Fix-metadata popup) is never gap-filled — the user pinned
+    # it away from the matched value, so writing that value to the file would
+    # be exactly the clobber the lock exists to prevent. (The lock field name is
+    # `genre`; the manifest/gap-fill key is `genres`.)
+    locked = meta_db.locked_fields(cache_key)
+    out = {}
+    album = (row.get("canon_album") or "").strip()
+    if album and "album" not in locked and _gap_fill_manifest_absent(manifest, "album"):
+        out["album"] = album
+    year = (row.get("canon_year") or "").strip()
+    if (year.isdigit() and int(year) and "year" not in locked
+            and _gap_fill_manifest_absent(manifest, "year")):
+        out["year"] = int(year)
+    genres = [str(g) for g in (row.get("genres") or []) if isinstance(g, str) and g.strip()]
+    if genres and "genre" not in locked and _gap_fill_manifest_absent(manifest, "genres"):
+        out["genres"] = genres
+    # Identity keys (feedpak spec 1.14.0) — written in canonical form only.
+    mbid = (row.get("mb_recording_id") or "").strip().lower()
+    if _MBID_RE.match(mbid) and _gap_fill_manifest_absent(manifest, "mbid"):
+        out["mbid"] = mbid
+    isrc = (row.get("isrc") or "").strip().upper().replace("-", "").replace(" ", "")
+    if _ISRC_RE.match(isrc) and _gap_fill_manifest_absent(manifest, "isrc"):
+        out["isrc"] = isrc
+    return out, ("" if out else "nothing-missing")
+
+
+@app.get("/api/song/{filename:path}/gap-fill")
+def get_song_gap_fill(filename: str):
+    """Preview what "Write missing info to file" would add — the Details
+    drawer renders its confirm list straight from this. Read-only."""
+    dlc = _get_dlc_dir()
+    cache_key, resolved = filename, None
+    if dlc:
+        resolved = _resolve_dlc_path(dlc, filename)
+        if resolved is None:
+            return JSONResponse({"error": "forbidden"}, 403)
+        try:
+            cache_key = resolved.relative_to(dlc.resolve()).as_posix()
+        except ValueError:
+            pass
+    proposals, reason = _gap_fill_proposals(cache_key, resolved)
+    row = meta_db.get_enrichment(cache_key) or {}
+    return {
+        "eligible": bool(proposals),
+        "reason": reason,
+        "match_state": row.get("match_state"),
+        "missing": [{"key": k, "value": v} for k, v in proposals.items()],
+    }
+
+
+@app.post("/api/song/{filename:path}/gap-fill")
+def post_song_gap_fill(filename: str, data: dict):
+    """Write the user-confirmed subset of the preview into the pack file.
+    Proposals are recomputed under the io lock, so a key that gained an
+    author value between preview and confirm is skipped, never replaced."""
+    keys = (data or {}).get("keys")
+    if not isinstance(keys, list) or not keys:
+        return JSONResponse({"error": "keys must be a non-empty list"}, 400)
+    bad = [k for k in keys if k not in _GAP_FILL_KEYS]
+    if bad:
+        return JSONResponse(
+            {"error": "unknown key(s): " + ", ".join(sorted(set(map(str, bad))))}, 400)
+
+    dlc = _get_dlc_dir()
+    cache_key, resolved = filename, None
+    if dlc:
+        resolved = _resolve_dlc_path(dlc, filename)
+        if resolved is None:
+            return JSONResponse({"error": "forbidden"}, 403)
+        try:
+            cache_key = resolved.relative_to(dlc.resolve()).as_posix()
+        except ValueError:
+            pass
+
+    with _song_io_lock:
+        proposals, reason = _gap_fill_proposals(cache_key, resolved)
+        additions = {k: proposals[k] for k in _GAP_FILL_KEYS if k in keys and k in proposals}
+        skipped = sorted(set(keys) - set(additions))
+        if not additions:
+            return JSONResponse({"error": "nothing to write", "reason": reason,
+                                 "skipped": skipped}, 409)
+        try:
+            import songmeta
+            songmeta.gap_fill_sloppak(resolved, additions)
+        except Exception:
+            log.warning("gap-fill write failed for %s", cache_key, exc_info=True)
+            return JSONResponse({"error": "write failed"}, 500)
+
+        # Keep the cache row consistent with what the scanner would now derive
+        # (same contract as the metadata editor above): sync the columns the
+        # scan reads from the keys we appended, then re-stat so the row stays
+        # cache-fresh.
+        fields = {}
+        if "album" in additions:
+            fields["album"] = additions["album"]
+        if "year" in additions:
+            fields["year"] = str(additions["year"])
+        if "genres" in additions:
+            fields["genre"] = additions["genres"][0]
+        with meta_db._lock:
+            updates = [f"{field} = ?" for field in fields]
+            params = list(fields.values())
+            try:
+                mtime, size = _stat_for_cache(resolved)
+                updates += ["mtime = ?", "size = ?"]
+                params += [mtime, size]
+            except OSError:
+                pass
+            if updates:
+                params.append(cache_key)
+                meta_db.conn.execute(
+                    f"UPDATE songs SET {', '.join(updates)} WHERE filename = ?", params)
+                meta_db.conn.commit()
+
+    _invalidate_song_caches(cache_key)
+    _kick_scan()
+    return {"ok": True, "written": additions, "skipped": skipped}
+
+
+def _save_art_override(filename: str, img_data: bytes) -> dict:
+    """Persist a user art override into the art cache (R3). One override per
+    song: GIF input is validated and kept VERBATIM as .gif (animation intact —
+    the local-only bonus; it is never written into the pack file), everything
+    else is normalized to RGB PNG via PIL. Saving either kind removes the
+    other so the serve chain has exactly one user file to find."""
+    ART_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    stem = _art_safe_name(filename)
+    png_path = ART_CACHE_DIR / f"{stem}.png"
+    gif_path = ART_CACHE_DIR / f"{stem}.gif"
+    from PIL import Image
+    import io as _io
+    if img_data[:6] in (b"GIF87a", b"GIF89a"):
+        try:
+            probe = Image.open(_io.BytesIO(img_data))
+            probe.verify()   # decodes headers/frames without keeping the image
+            if probe.format != "GIF":
+                raise ValueError("not a GIF")
+        except Exception as e:
+            return {"error": f"Invalid image: {e}"}
+        gif_path.write_bytes(img_data)
+        png_path.unlink(missing_ok=True)
+        return {"ok": True, "kind": "gif"}
+    try:
+        img = Image.open(_io.BytesIO(img_data)).convert("RGB")
+        img.save(str(png_path), "PNG")
+    except Exception as e:
+        return {"error": f"Invalid image: {e}"}
+    gif_path.unlink(missing_ok=True)
+    return {"ok": True, "kind": "png"}
+
+
 @app.post("/api/song/{filename:path}/art/upload")
 async def upload_song_art_b64(filename: str, data: dict):
-    """Upload custom album art as base64 PNG/JPG."""
+    """Upload a custom cover as base64 (PNG/JPG/WebP → normalized PNG;
+    GIF → kept animated, local-only). The override outranks pack art in the
+    serve chain; remove it via DELETE …/art/override."""
     import base64
+    # Reject art for a filename that doesn't resolve to a real song (mirrors the
+    # url route's guard) — no writing stray override files for unknown keys.
+    dlc = _get_dlc_dir()
+    song_path = _resolve_dlc_path(dlc, filename) if dlc else None
+    if song_path is None or not song_path.exists():
+        raise HTTPException(status_code=404, detail="unknown song")
     b64 = data.get("image", "")
     if not b64:
         return {"error": "No image data"}
@@ -10112,22 +12699,153 @@ async def upload_song_art_b64(filename: str, data: dict):
         img_data = base64.b64decode(b64)
     except Exception:
         return {"error": "Invalid base64"}
+    if len(img_data) > _ART_URL_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="image larger than 10 MB")
+    return _save_art_override(filename, img_data)
 
-    art_cache = ART_CACHE_DIR
-    art_cache.mkdir(parents=True, exist_ok=True)
-    safe_name = filename.replace("/", "_").replace(" ", "_")
-    cached = art_cache / f"{safe_name}.png"
 
-    # Convert to PNG if needed
+# Art-by-URL fetch cap — a cover, not a wallpaper pack.
+_ART_URL_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _url_host_is_internal(url: str) -> bool:
+    """True when a user-supplied URL's host resolves to a loopback, private,
+    link-local, reserved, multicast or unspecified address — an SSRF target we
+    refuse to fetch on the user's behalf (e.g. 169.254.169.254 metadata, LAN
+    services). Fails CLOSED: an unresolvable or unparseable host is treated as
+    internal. Every resolved address must be public for the URL to pass."""
+    from urllib.parse import urlparse
+    import socket
+    host = urlparse(url).hostname
+    if not host:
+        return True
     try:
-        from PIL import Image
-        import io
-        img = Image.open(io.BytesIO(img_data)).convert("RGB")
-        img.save(str(cached), "PNG")
-    except Exception as e:
-        return {"error": f"Invalid image: {e}"}
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    if not infos:
+        return True
+    for info in infos:
+        raw = info[4][0].split("%", 1)[0]  # strip any zone id
+        try:
+            ip = ipaddress.ip_address(raw)
+        except ValueError:
+            return True
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            return True
+    return False
 
-    return {"ok": True}
+
+# Art-by-URL redirect budget. Cover hosts commonly answer with a redirect —
+# the Cover Art Archive (whose thumbs the cover picker applies through this
+# very route) 307s every image to archive.org — so redirects must work; 5
+# hops is generous for any real CDN chain while still bounding the walk.
+_ART_URL_MAX_REDIRECTS = 5
+
+
+def _fetch_art_url(url: str) -> bytes:
+    """The one place art-by-URL touches the network (tests fake this seam).
+    User-initiated, so not throttled like the background workers — but the
+    same offline guard applies (pytest can never fetch), the host is checked
+    against internal/reserved ranges (SSRF), redirects are followed MANUALLY
+    with the scheme + internal-host guard re-applied to every hop (so a
+    redirect can't smuggle the request to an internal target — a blanket
+    no-redirect rule would break every Cover Art Archive pick, which always
+    redirects to archive.org), and the size cap is enforced while streaming
+    so a huge response never fully downloads.
+
+    Residual, accepted: each hop's host is resolved here and again by
+    requests, so a rebinding DNS name is a theoretical TOCTOU. Not closed
+    with an IP-pinned connection because (a) this is a single-user, no-auth
+    app (constitution §I) and the route is demo-blocked, so there is no
+    untrusted submission path, and (b) no other in-tree client (MusicBrainz,
+    CAA) pins either — a bespoke pinned+SNI adapter here would be
+    inconsistent and disproportionate. The cheap guards above still stop the
+    realistic vectors (direct internal URL, redirect-to-internal)."""
+    if not _enrich_network_enabled():
+        raise EnrichTransportError("art fetch disabled (offline)")
+    import requests
+    from urllib.parse import urljoin, urlparse
+    for _hop in range(_ART_URL_MAX_REDIRECTS + 1):
+        # Re-validate EVERY hop, not just the user's original URL: the whole
+        # point of handling redirects ourselves is that each target gets the
+        # same scheme + SSRF gate before any request is made.
+        if urlparse(url).scheme not in ("http", "https"):
+            raise ValueError("url must be http(s)")
+        if _url_host_is_internal(url):
+            raise ValueError("url host is not allowed")
+        try:
+            with requests.get(url, timeout=15, stream=True, allow_redirects=False,
+                              headers={"User-Agent": _enrich_user_agent()}) as resp:
+                if resp.status_code in (301, 302, 303, 307, 308):
+                    loc = resp.headers.get("Location") or ""
+                    if not loc:
+                        raise EnrichTransportError(
+                            f"HTTP {resp.status_code} without a Location")
+                    url = urljoin(url, loc)
+                    continue
+                if resp.status_code != 200:
+                    raise EnrichTransportError(f"HTTP {resp.status_code}")
+                data = b""
+                for chunk in resp.iter_content(65536):
+                    data += chunk
+                    if len(data) > _ART_URL_MAX_BYTES:
+                        raise ValueError("image larger than 10 MB")
+                return data
+        except requests.RequestException as e:
+            raise EnrichTransportError(str(e)) from e
+    raise EnrichTransportError("too many redirects")
+
+
+@app.post("/api/song/{filename:path}/art/url")
+def set_song_art_from_url(filename: str, data: dict):
+    """Paste-a-link cover art (the media-server idiom): the server fetches the
+    image and stores it as this song's local override — identical result to an
+    upload, including the GIF-stays-local rule. http(s) only."""
+    url = str((data or {}).get("url") or "").strip()
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(status_code=400, detail="url must be http(s)")
+    dlc = _get_dlc_dir()
+    song_path = _resolve_dlc_path(dlc, filename) if dlc else None
+    if song_path is None or not song_path.exists():
+        raise HTTPException(status_code=404, detail="unknown song")
+    try:
+        img_data = _fetch_art_url(url)
+    except EnrichTransportError as e:
+        return JSONResponse({"error": "could not fetch image", "detail": str(e)},
+                            status_code=502)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return _save_art_override(filename, img_data)
+
+
+@app.delete("/api/art/{filename:path}/override")
+def remove_song_art_override(filename: str):
+    """Drop the user art override — the serve chain falls back to pack art,
+    then the Cover Art Archive cache. Lives under /api/art (NOT /api/song) so
+    the greedy DELETE /api/song/{path} catch-all can't shadow it — the same
+    dodge the chart split/unsplit routes use."""
+    removed = False
+    for p in _art_override_paths(filename):
+        try:
+            p.unlink()
+            removed = True
+        except OSError:
+            pass
+    if removed:
+        # The art worker may have settled this row as 'user' (override present,
+        # no pack art). Reset it so the next enrichment pass re-evaluates and the
+        # CAA fallback resumes — otherwise a removed override strands the row
+        # (enrichment_art_pending only re-queues art_state IS NULL) and the song
+        # is left with no art at all.
+        try:
+            meta_db.set_enrichment_art(filename, None, None)
+        except Exception:
+            log.exception("art override delete: failed to reset enrichment state")
+    return {"ok": True, "removed": removed}
 
 
 @app.get("/api/song/{filename:path}")

@@ -10,9 +10,9 @@ source of truth, so the change survives both incremental and full rescans.
 only the keys present are overwritten, so an edit of just the title can't blank
 out the artist.
 
-Only feedBack's own ``.sloppak`` format (zip- or directory-form) is writable.
-Unknown / unsupported shapes return False and the caller keeps the DB-only
-update.
+Only feedBack's own song-package format (zip- or directory-form, ``.feedpak``
+or the legacy ``.sloppak`` suffix) is writable. Unknown / unsupported shapes
+return False and the caller keeps the DB-only update.
 """
 from __future__ import annotations
 
@@ -107,19 +107,75 @@ def write_sloppak_metadata(path: Path, fields: dict) -> bool:
     return _rewrite_zip_manifest(path, dumped)
 
 
+def gap_fill_sloppak(path: Path, additions: dict) -> bool:
+    """Append ABSENT top-level keys to a sloppak manifest (the gap-fill
+    contract: user-initiated, adds missing keys only, never replaces
+    anything the author set).
+
+    Unlike ``write_sloppak_metadata`` this does NOT re-serialize the
+    manifest — because every added key is absent by definition, the new
+    lines can simply be appended, so the author's existing bytes (key
+    order, comments, formatting) survive verbatim. Directory form gets a
+    one-time ``manifest.yaml.bak`` + temp + atomic replace; zip form goes
+    through the same backup/temp/replace rewriter the metadata editor
+    uses. Returns True if anything was written; raises ``ValueError`` if
+    a requested key already exists (callers are expected to have checked
+    — this is the last-line never-clobber guard)."""
+    import sloppak as sloppak_mod
+
+    path = Path(path)
+    if not additions:
+        return False
+    manifest = sloppak_mod.load_manifest(path) or {}
+    clash = sorted(k for k in additions if k in manifest)
+    if clash:
+        raise ValueError("gap-fill refused: key(s) already present: " + ", ".join(clash))
+
+    if path.is_dir():
+        mf = path / "manifest.yaml"
+        if not mf.exists() and (path / "manifest.yml").exists():
+            mf = path / "manifest.yml"
+        original = mf.read_text(encoding="utf-8")
+    else:
+        with zipfile.ZipFile(str(path), "r") as zin:
+            names = zin.namelist()
+            manifest_name = "manifest.yaml"
+            for cand in ("manifest.yaml", "manifest.yml"):
+                if cand in names:
+                    manifest_name = cand
+                    break
+            original = zin.read(manifest_name).decode("utf-8")
+
+    appended = original if original.endswith("\n") or not original else original + "\n"
+    appended += yaml.safe_dump(additions, sort_keys=False, allow_unicode=True)
+
+    if path.is_dir():
+        backup = mf.with_name(mf.name + ".bak")
+        if not backup.exists():
+            shutil.copy2(mf, backup)
+        tmp = mf.with_name(mf.name + ".tmp")
+        tmp.write_text(appended, encoding="utf-8")
+        tmp.replace(mf)
+        return True
+    return _rewrite_zip_manifest(path, appended)
+
+
 def write_song_metadata(path: Path, fields: dict) -> bool:
     """Persist edited title/artist/album/year into the song's file.
 
-    Dispatches by shape: ``.sloppak`` files and sloppak directories
+    Dispatches by shape: zip-form song packages (``.feedpak`` / legacy
+    ``.sloppak``, per ``sloppak.SONG_EXTS``) and package directories
     (manifest.yaml present). Loose-folder and unknown shapes return False
     (caller keeps the DB-only update). Returns True if the file was modified.
     """
+    from sloppak import SONG_EXTS
+
     path = Path(path)
     suffix = path.suffix.lower()
     if path.is_dir():
         if (path / "manifest.yaml").exists() or (path / "manifest.yml").exists():
             return write_sloppak_metadata(path, fields)
         return False
-    if suffix == ".sloppak":
+    if suffix in SONG_EXTS:
         return write_sloppak_metadata(path, fields)
     return False

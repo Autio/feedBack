@@ -2758,6 +2758,12 @@ function goFavTreePage(p) {
 // ── Settings ─────────────────────────────────────────────────────────────
 let _defaultArrangement = '';
 
+const INSTRUMENT_PATHWAYS = ['songs', 'practice', 'learn', 'studio'];
+
+function _normalizeInstrumentPathway(value) {
+    return INSTRUMENT_PATHWAYS.includes(value) ? value : 'songs';
+}
+
 function _syncDefaultArrangementSelect(value) {
     const sel = document.getElementById('default-arrangement');
     if (!sel) return;
@@ -2864,6 +2870,10 @@ const HWC_DEFAULT_FALLBACK = { lowE: '#cc0000', A: '#cca800', D: '#0066cc', G: '
 //   - colorblind: the Okabe–Ito accessible qualitative palette (vermillion,
 //     orange, yellow, bluish-green, sky-blue, blue, reddish-purple), the most
 //     distinguishable option for deuteranopia/protanopia.
+//   - colorblind_deuteranope: a deuteranope-tuned variant of the Okabe–Ito set
+//     above, contributed by a deuteranopic player who still found that set hard
+//     to separate. Retunes the six main strings (red / yellow-green / blue /
+//     orange / teal / deep-purple) and keeps its 7/8-string colors unchanged.
 //   - neon: electric, max-saturation hues whose LIGHTNESS deliberately zig-zags
 //     between neighbours (bright→bright→brightest→dark blue→bright green→dark
 //     violet) so adjacent strings separate harder than vivid — a stage/stream
@@ -2899,6 +2909,10 @@ const HWC_PRESETS = [
     {
         id: 'colorblind', label: 'Colorblind-friendly',
         colors: { lowE: '#d55e00', A: '#e69f00', D: '#f0e442', G: '#009e73', B: '#56b4e9', highE: '#cc79a7', low7: '#0072b2', low8: '#999999' },
+    },
+    {
+        id: 'colorblind_deuteranope', label: 'Colorblind (deuteranope)',
+        colors: { lowE: '#aa1414', A: '#88de00', D: '#1889e3', G: '#c6601c', B: '#00f5b2', highE: '#4d2173', low7: '#0072b2', low8: '#999999' },
     },
     {
         id: 'neon', label: 'Neon',
@@ -3410,6 +3424,8 @@ async function loadSettings() {
     if (dlcEl) dlcEl.value = data.dlc_dir || '';
     _defaultArrangement = data.default_arrangement || '';
     _syncDefaultArrangementSelect(_defaultArrangement);
+    const pathwayEl = document.getElementById('setting-instrument-pathway');
+    if (pathwayEl) pathwayEl.value = _normalizeInstrumentPathway(data.pathway);
     const demucsEl = document.getElementById('demucs-server-url');
     if (demucsEl) demucsEl.value = data.demucs_server_url || '';
     const leftyEl = document.getElementById('setting-lefty');
@@ -3901,6 +3917,18 @@ function persistSetting(key, value) {
     _settingSaveChain = next.catch(() => {});
     return next;
 }
+function setInstrumentPathway(value) {
+    const pathway = _normalizeInstrumentPathway(value);
+    const el = document.getElementById('setting-instrument-pathway');
+    if (el) el.value = pathway;
+    persistSetting('pathway', pathway).then(() => {
+        if (window.v3Badges && typeof window.v3Badges.reload === 'function') {
+            try { window.v3Badges.reload(); } catch (_) { /* noop */ }
+        }
+    });
+}
+
+
 async function _postSetting(key, value) {
     const status = document.getElementById('settings-status');
     try {
@@ -6195,7 +6223,7 @@ window.feedBack.on('song:ready', () => {
             setSpeed(pend.speed);
         }
     } catch (_) { /* speed restore is best-effort */ }
-    Promise.resolve(_audioSeek(Math.max(0, Number(pend.position) || 0), 'resume'))
+    Promise.resolve(_audioSeek(Math.max(0, Number(pend.position) || 0), 'session-resume'))
         .then(() => { if (_autoplayExitEnabled() && !isPlaying) return togglePlay(); })
         .catch((err) => console.warn('[app] resume failed:', err));
 });
@@ -6761,7 +6789,16 @@ window.feedBack.playQueue = (function () {
         if (!files.length) return false;
         list = files.slice(); idx = 0;
         source = (opts && opts.source) || '';
-        arrangements = (opts && opts.arrangements) || null;
+        arrangements = (opts && opts.arrangements) ? opts.arrangements.slice() : null;
+        if (opts && opts.shuffle && list.length > 1) {
+            // Fisher-Yates, once at start. Swap arrangements in lockstep so an
+            // album slot's pinned arrangement stays glued to its file (#685).
+            for (let i = list.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [list[i], list[j]] = [list[j], list[i]];
+                if (arrangements) [arrangements[i], arrangements[j]] = [arrangements[j], arrangements[i]];
+            }
+        }
         if (window.fbNotify) {
             try { window.fbNotify.show({ title: 'Playing ' + (source || 'queue'), message: files.length + ' songs', icon: '▶' }); } catch (e) { /* */ }
         }
@@ -6778,6 +6815,14 @@ window.feedBack.playQueue = (function () {
         start: start, advance: advance, hasNext: hasNext, active: active, clear: clear,
         source: function () { return source; },
         remaining: function () { return active() ? list.length - idx - 1 : 0; },
+        // What's coming, for consumers that RENDER the queue (a results
+        // screen's "Up next: … starting in 10s" strip) without reaching into
+        // queue internals. Null when nothing follows.
+        peekNext: function () {
+            return hasNext()
+                ? { filename: list[idx + 1], index: idx + 1, total: list.length }
+                : null;
+        },
     };
 })();
 
@@ -8055,6 +8100,26 @@ function _resolveEditRegion() {
     return { a: Math.max(0, t - 4), b: t + 4 };
 }
 
+/* @pure:editor-pending-view:start */
+function _buildEditorPendingViewPure(filename, arrangement, region, opts) {
+    const options = opts || {};
+    const view = {
+        filename,
+        arrangement: Number.isFinite(arrangement) && arrangement >= 0 ? arrangement : 0,
+        barSel: region ? { startTime: region.a, endTime: region.b } : null,
+    };
+    if (options.returnToHighway) view.returnToHighway = true;
+    if (typeof options.cursorTime === 'number') {
+        view.cursorTime = options.cursorTime;
+    } else if (region && typeof region.a === 'number') {
+        view.cursorTime = region.a;
+    }
+    if (typeof options.scrollX === 'number') view.scrollX = Math.max(0, options.scrollX);
+    if (typeof options.zoom === 'number' && options.zoom > 0) view.zoom = options.zoom;
+    return view;
+}
+/* @pure:editor-pending-view:end */
+
 // Enable "Edit region" whenever the editor plugin is present and a song is
 // loaded; show "↩ Editor" only while a return context is pending.
 function _updateEditRegionBtn() {
@@ -8081,12 +8146,9 @@ function editRegionInEditor() {
             arrangement = si.arrangement_index;
         }
     } catch (_) { /* default to 0 */ }
-    window._editorPendingView = {
-        filename: currentFilename,
-        arrangement,
-        barSel: { startTime: region.a, endTime: region.b },
+    window._editorPendingView = _buildEditorPendingViewPure(currentFilename, arrangement, region, {
         returnToHighway: true,
-    };
+    });
     window.editSong(currentFilename);
 }
 window.editRegionInEditor = editRegionInEditor;
@@ -8098,14 +8160,14 @@ function returnToEditorFromHighway() {
     const ctx = window._highwayReturnCtx;
     if (!ctx || typeof window.editSong !== 'function') return;
     window._highwayReturnCtx = null;
-    window._editorPendingView = {
-        filename: ctx.filename,
-        arrangement: ctx.arrangement,
+    const region = ctx.barSel
+        ? { a: ctx.barSel.startTime, b: ctx.barSel.endTime }
+        : null;
+    window._editorPendingView = _buildEditorPendingViewPure(ctx.filename, ctx.arrangement, region, {
         scrollX: ctx.scrollX,
         zoom: ctx.zoom,
         cursorTime: ctx.cursorTime,
-        barSel: ctx.barSel,
-    };
+    });
     window.editSong(ctx.filename);
 }
 window.returnToEditorFromHighway = returnToEditorFromHighway;
@@ -10960,20 +11022,19 @@ async function loadPlugins() {
             const nameDelta = String(a.name || a.id || '').localeCompare(String(b.name || b.id || ''));
             return nameDelta || String(a.id || '').localeCompare(String(b.id || ''));
         });
-        const livePluginIds = new Set(plugins.map((plugin) => plugin.id));
-        for (const [pluginId, contributions] of _pluginUiContributions) {
-            if (livePluginIds.has(pluginId)) continue;
-            const stalePlugin = { id: pluginId };
-            for (const contribution of contributions) {
-                await _commandUiDomain(contribution.domain, 'unmount', stalePlugin, contribution);
-            }
-            try {
-                window.feedBack?.capabilities?.unregisterParticipant?.(pluginId);
-            } catch (e) {
-                console.warn(`capability participant unregister failed for ${pluginId}:`, e);
-            }
-            _pluginUiContributions.delete(pluginId);
-        }
+        // NOTE deliberately NO stale-contribution sweep for plugins absent
+        // from this response. Absent ≠ uninstalled: the backend clears its
+        // plugin registry at the start of load_plugins() and repopulates it
+        // incrementally while HTTP stays up, so every backend restart serves a
+        // window of partial (even empty) responses. The old sweep unmounted UI
+        // contributions and unregistered capability participants on mere
+        // absence, permanently breaking still-loaded plugins — their scripts
+        // don't re-run (loadedScripts guard below), so nothing ever
+        // re-registered. A genuine mid-session uninstall now leaves the
+        // (already-evaluated, un-unloadable) script's contributions in place
+        // until reload; its nav entry still disappears because nav is rebuilt
+        // from the response each round. Same invariant as the settings/screen
+        // DOM wipe and _reconcilePluginStyles below.
         console.log('[feedBack] loadPlugins: got', plugins.length, 'plugins');
 
         try {
@@ -11115,17 +11176,23 @@ async function loadPlugins() {
             loadedStyles.set(plugin.id, wantedVersion);
         };
         const _reconcilePluginStyles = (currentPlugins) => {
-            // Drop stylesheets for plugins that vanished from /api/plugins or are
-            // no longer ready+styled this round. _injectPluginStyles below only
-            // visits plugins still returned by the API, so an uninstalled or
-            // newly-not-ready plugin would otherwise keep its <link> applying.
+            // Drop stylesheets for plugins the response KNOWS about but that
+            // are no longer ready+styled this round. _injectPluginStyles below
+            // only visits plugins still returned by the API, so a newly-not-
+            // ready or unstyled plugin would otherwise keep its <link>
+            // applying. Plugins merely ABSENT from the response keep their
+            // stylesheet — a transient partial response during a backend
+            // restart is not an uninstall (same invariant as the screen/
+            // settings wipe below), and stripping the <link> would leave a
+            // still-loaded plugin visible but unstyled.
+            const responded = new Set(currentPlugins.map((p) => p.id));
             const styled = new Set(
                 currentPlugins
                     .filter((p) => (p.status || 'ready') === 'ready' && p.has_styles && p.styles)
                     .map((p) => p.id),
             );
             for (const id of Array.from(loadedStyles.keys())) {
-                if (!styled.has(id)) {
+                if (responded.has(id) && !styled.has(id)) {
                     _removePluginStyleTags(id);
                     loadedStyles.delete(id);
                 }
@@ -11138,6 +11205,18 @@ async function loadPlugins() {
                 if (pid) existingSettingsByPluginId.set(pid, child);
             }
         }
+        // Plugins named in THIS response. A plugin can be transiently absent
+        // from /api/plugins — the backend clears its registry at the start of
+        // load_plugins() and repopulates it incrementally while HTTP stays up,
+        // so every backend restart serves a window of partial (even empty)
+        // responses. The wipe loops below must never treat that absence as an
+        // uninstall: stripping a still-loaded plugin's DOM while keeping its
+        // loadedScripts entry made the NEXT refetch fail the DOM check and
+        // re-evaluate its screen.js mid-session — which duplicated the desktop
+        // audio_engine's native signal chain (its init re-ran against the
+        // surviving engine chain). Absent plugins keep their DOM and script;
+        // they're re-reconciled when they reappear in a later response.
+        const respondedIds = new Set(plugins.map((p) => p.id));
         const alreadyHydrated = new Set();
         for (const p of plugins) {
             if (!p.has_script) continue;
@@ -11165,7 +11244,10 @@ async function loadPlugins() {
         for (const container of _pluginSettingsContainers()) {
             [...container.children].forEach((el) => {
                 const pid = el.dataset ? el.dataset.pluginId : null;
-                if (!pid || !alreadyHydrated.has(pid)) el.remove();
+                // Remove junk (no plugin id) and plugins the response KNOWS
+                // about but that failed hydration; leave plugins absent from
+                // the response untouched (see respondedIds above).
+                if (!pid || (respondedIds.has(pid) && !alreadyHydrated.has(pid))) el.remove();
             });
         }
         document.querySelectorAll('.screen[id^="plugin-"]').forEach((el) => {
@@ -11174,7 +11256,7 @@ async function loadPlugins() {
             // change shipped — both forms strip a single leading "plugin-".
             const pid = (el.dataset && el.dataset.pluginId)
                 || el.id.replace(/^plugin-/, '');
-            if (!alreadyHydrated.has(pid)) el.remove();
+            if (!pid || (respondedIds.has(pid) && !alreadyHydrated.has(pid))) el.remove();
         });
 
         // Plugin settings area hosts both "Plugin Updates" and per-plugin
