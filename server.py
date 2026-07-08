@@ -5038,6 +5038,7 @@ class LibraryProviderRegistry:
             "kind": self.provider_field(provider, "kind", "local" if provider_id == "local" else "remote"),
             "capabilities": sorted(self.provider_capabilities(provider)),
             "owner_plugin_id": owner_plugin_id,
+            "slow": self.provider_slow(provider),
             "default": provider_id == "local",
         }
 
@@ -5057,6 +5058,13 @@ class LibraryProviderRegistry:
         if not isinstance(label, str):
             return ""
         return label.strip()
+
+    def provider_slow(self, provider: object) -> bool:
+        return bool(
+            self.provider_field(provider, "slow", False)
+            or self.provider_field(provider, "is_slow", False)
+            or self.provider_field(provider, "slow_mode", False)
+        )
 
     def _declared_capabilities(self, provider: object) -> set[str]:
         """Return only the capabilities explicitly declared on the provider object."""

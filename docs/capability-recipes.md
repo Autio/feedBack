@@ -80,6 +80,8 @@ A plugin that only reads public events should declare `observer` and no command 
 
 A plugin that registers a remote client or generated library source declares itself as a `library` provider. The backend registration call is still made from `routes.py` with `context["register_library_provider"](...)`; the native browser library capability turns the provider registry into runtime provider participants. A thin server wrapper that only exposes the local library over HTTP should not declare `library` as a provider unless it also registers a provider in the library registry.
 
+Provider objects may set `slow: true` when their backing connection can take a while to answer. Core exposes that flag through `/api/library/providers` and the browser library capability so library views show explicit loading indicators instead of looking idle during the wait.
+
 ```json
 {
   "id": "remote_library_client",

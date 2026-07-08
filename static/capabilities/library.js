@@ -13,6 +13,7 @@
         label: 'My Library',
         kind: 'local',
         capabilities: ['library.read', 'art.read', 'song.play', 'favorite.write', 'metadata.write', 'retune.write'],
+        slow: false,
         default: true,
     });
     const PROVIDER_OPERATIONS = Object.freeze({
@@ -72,6 +73,7 @@
             label: String(provider.label || provider.name || providerId),
             kind: String(provider.kind || (providerId === 'local' ? 'local' : 'remote')),
             capabilities: _strings(provider.capabilities),
+            slow: provider.slow === true || provider.is_slow === true || provider.slow_mode === true,
             default: provider.default === true || providerId === 'local',
         };
     }
@@ -141,6 +143,7 @@
                         label: provider.label || providerId,
                         kind: provider.kind || (providerId === 'local' ? 'local' : 'remote'),
                         capabilities: _strings(provider.capabilities),
+                        slow: provider.slow === true,
                         ownerPluginId: _ownerPluginId(provider) || null,
                         default: provider.default === true || providerId === 'local',
                     },

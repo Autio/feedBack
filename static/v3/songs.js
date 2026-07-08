@@ -64,6 +64,7 @@
 
         filters: { arr_has: [], arr_lacks: [], stem_has: [], stem_lacks: [], lyrics: '', tunings: [], mastery: [], match: [], genre: [] },
         page: 0, total: 0, loading: false, built: false, accuracy: {}, tuningNames: [], genres: [],
+        providers: [],
         artistCatalog: [], renderedHash: '',
         scrollBound: false,
         songsById: {}, selectMode: false, selected: new Set(),
@@ -441,6 +442,24 @@
     }
 
     async function jget(url) { try { const r = await fetch(url); return r.ok ? r.json() : null; } catch (e) { return null; } }
+
+    function activeProvider() {
+        return (state.providers || []).find((provider) => provider.id === state.provider) || { id: state.provider || 'local', label: 'My Library', kind: 'local' };
+    }
+
+    function providerLoadingText() {
+        const provider = activeProvider();
+        if (!provider || provider.id === 'local' || provider.kind === 'local') return 'Loading library...';
+        if (provider.slow === true) return 'Loading ' + (provider.label || provider.id) + '... this source may take a while.';
+        return 'Connecting to ' + (provider.label || provider.id) + '...';
+    }
+
+    function loadingPanelHtml() {
+        return '<div role="status" aria-live="polite" class="rounded-lg border border-fb-border/50 bg-fb-card/50 px-4 py-5 text-sm text-fb-textDim flex items-center gap-3" style="grid-column:1/-1">' +
+            '<span class="inline-block h-4 w-4 rounded-full border-2 border-fb-border border-t-fb-primary animate-spin" aria-hidden="true"></span>' +
+            '<span>' + esc(providerLoadingText()) + '</span>' +
+            '</div>';
+    }
 
     // ── Provider-aware song helpers ────────────────────────────────────────
     // Remote library providers (feedBack-plugin-remote-library-*) expose songs
@@ -2090,6 +2109,10 @@
             grid.style.top = '0px';
             const sizer = _sizerEl();
             if (sizer) sizer.style.height = '0px';
+            const countEl = document.getElementById('v3-songs-count');
+            if (countEl) countEl.textContent = 'Loading source...';
+            grid.innerHTML = loadingPanelHtml();
+            if (sizer) sizer.style.height = grid.offsetHeight + 'px';
         }
         state.loading = true;
         await _loadPage(0);
@@ -2385,7 +2408,7 @@
     async function loadAlbums() {
         const host = document.getElementById('v3-songs-albums');
         if (!host) return;
-        host.innerHTML = '<p class="text-fb-textDim text-sm">Loading…</p>';
+        host.innerHTML = '<div role="status" aria-live="polite" class="text-fb-textDim text-sm flex items-center gap-3"><span class="inline-block h-4 w-4 rounded-full border-2 border-fb-border border-t-fb-primary animate-spin" aria-hidden="true"></span><span>' + esc(providerLoadingText()) + '</span></div>';
         const data = await jget('/api/library/albums?' + queryParams().toString());
         const albums = (data && data.albums) || [];
         if (!albums.length) { host.innerHTML = '<p class="text-fb-textDim text-sm py-8 text-center">No albums match.</p>'; return; }
@@ -2770,7 +2793,7 @@
         // (e.g. toggling select mode) restores them instead of collapsing all.
         const openArtists = new Set(
             [...host.querySelectorAll('details[open]')].map((d) => d.getAttribute('data-artist')));
-        host.innerHTML = '<p class="text-fb-textDim text-sm">Loading…</p>';
+        host.innerHTML = '<div role="status" aria-live="polite" class="text-fb-textDim text-sm flex items-center gap-3"><span class="inline-block h-4 w-4 rounded-full border-2 border-fb-border border-t-fb-primary animate-spin" aria-hidden="true"></span><span>' + esc(providerLoadingText()) + '</span></div>';
         // Page through ALL artists — the endpoint clamps size to 100, so a
         // single request would silently truncate libraries with >100 artists.
         const artists = [];
@@ -3457,12 +3480,14 @@
                 const snap = await fn.call(lp);
                 if (snap && Array.isArray(snap.providers)) {
                     state.provider = snap.current || (snap.providers[0] && snap.providers[0].id) || 'local';
+                    state.providers = snap.providers;
                     return snap.providers;
                 }
             }
         } catch (e) { /* */ }
         const data = await jget('/api/library/providers');
-        return (data && data.providers) || [{ id: 'local', label: 'My Library' }];
+        state.providers = (data && data.providers) || [{ id: 'local', label: 'My Library', kind: 'local' }];
+        return state.providers;
     }
 
     async function render() {

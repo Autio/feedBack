@@ -50,6 +50,7 @@ class FakeLibraryProvider:
     id = "remote:frodo"
     label = "Frodo's Library"
     kind = "remote"
+    slow = True
     capabilities = ("library.read", "art.read", "song.sync")
 
     def __init__(self):
@@ -170,6 +171,7 @@ def test_registered_provider_handles_library_endpoints(server_mod, client):
     assert remote["label"] == "Frodo's Library"
     assert remote["kind"] == "remote"
     assert remote["default"] is False
+    assert remote["slow"] is True
     assert remote["capabilities"] == ["art.read", "library.read", "song.sync"]
 
     songs = client.get("/api/library", params={

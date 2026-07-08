@@ -1871,7 +1871,10 @@ function _setLibraryLoadingMessage(containerId, countId, message) {
     const count = document.getElementById(countId);
     if (count) count.textContent = 'Loading source...';
     if (container) {
-        container.innerHTML = `<div class="rounded-xl border border-gray-800/50 bg-dark-700/30 px-4 py-6 text-sm text-gray-300">${esc(message || 'Loading library...')}</div>`;
+        container.innerHTML = `<div role="status" aria-live="polite" class="rounded-xl border border-gray-800/50 bg-dark-700/30 px-4 py-6 text-sm text-gray-300 flex items-center gap-3">
+            <span class="inline-block h-4 w-4 rounded-full border-2 border-gray-600 border-t-accent animate-spin" aria-hidden="true"></span>
+            <span>${esc(message || 'Loading library...')}</span>
+        </div>`;
     }
 }
 
@@ -1879,6 +1882,9 @@ function _libraryLoadingText() {
     const provider = _activeLibraryProvider();
     if (!provider || provider.id === 'local' || provider.kind === 'local') {
         return 'Loading library...';
+    }
+    if (provider.slow === true) {
+        return `Loading ${provider.label || provider.id}... this source may take a while.`;
     }
     return `Connecting to ${provider.label || provider.id}...`;
 }
