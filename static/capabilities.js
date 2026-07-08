@@ -86,6 +86,7 @@
     // operation is still completing through the provider.
     const COMMAND_TIMEOUTS_MS = {
         'audio-mix': { 'get-fader-value': 2100, 'set-fader-value': 2100 },
+        'library': { 'refresh-providers': 15000, 'sync-song': 15000 },
         'midi-input': { 'discover': 15000, 'open-source': 15000 },
     };
     function _commandTimeoutFor(capability, commandName) {

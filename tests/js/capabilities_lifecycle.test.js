@@ -78,3 +78,33 @@ test('failed no-op registrations do not block reload and rehydrate replacement',
     assert.equal(result.status, 'applied');
     assert.equal(result.payload.generation, 2);
 });
+
+test('library long-running commands override the default handler timeout', async () => {
+    const window = loadCapabilities();
+    const api = window.feedBack.capabilities;
+    const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    api.registerParticipant('stems', {
+        stems: {
+            roles: ['owner'],
+            commands: ['slow-probe'],
+            handlers: { 'slow-probe': async () => { await delay(300); return { outcome: 'handled' }; } },
+            runtime: true,
+        },
+    });
+    const timedOut = await api.dispatch({ capability: 'stems', command: 'slow-probe', source: 'test' });
+    assert.equal(timedOut.outcome, 'failed');
+    assert.match(timedOut.reason, /timed out after 250 ms/);
+
+    api.registerParticipant('core.library', {
+        library: {
+            roles: ['owner'],
+            commands: ['sync-song'],
+            handlers: { 'sync-song': async () => { await delay(300); return { outcome: 'handled', payload: { ok: true } }; } },
+            runtime: true,
+        },
+    });
+    const synced = await api.dispatch({ capability: 'library', command: 'sync-song', source: 'test' });
+    assert.equal(synced.status, 'applied');
+    assert.equal(synced.payload.ok, true);
+});
