@@ -2683,10 +2683,14 @@
             cam.lookAt(0, 0, -AHEAD * TS * 0.45);
         }
 
-        // Camera Director bridge for THIS panel — delegates to the pure, unit-
-        // tested _resolveFreeCam / _ssApi (see the resolver block above the
-        // factory). Reads the live globals: per-panel map __h3dCamCtlPanels →
-        // this panel's camera, else the global __h3dCamCtl, else null (stock).
+        /**
+         * Camera Director bridge for THIS panel — delegates to the pure, unit-
+         * tested _resolveFreeCam / _ssApi (resolver block above the factory).
+         * Reads the live globals: per-panel map __h3dCamCtlPanels → this panel's
+         * camera, else the global __h3dCamCtl, else null (stock framing).
+         * @param {HTMLCanvasElement} canvas this panel's highway canvas
+         * @returns {object|null} the resolved free-camera bridge, or null
+         */
         function _freeCamFor(canvas) {
             return _resolveFreeCam(canvas, _ssApi(), window.__h3dCamCtlPanels, window.__h3dCamCtl);
         }
