@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **`MetadataDB` moved out of `server.py` into `lib/metadata_db.py` (R3, move-only).**
+  The library metadata cache — the `MetadataDB` class (4,018 lines) plus the query
+  helpers it owns (keyset paging cursors, the tuning grouping key, smart-arrangement
+  naming, tag normalisation, the startup DB-restore swap) — now lives in its own flat
+  `lib/` module. `server.py` drops from **14,037 → 9,705 lines** and keeps the
+  `meta_db` singleton, so `server.meta_db` and `server.app` resolve exactly as before
+  and every route is untouched. The only non-verbatim change is the seam that lets the
+  class leave `server.py`: `MetadataDB.__init__` now takes `config_dir` explicitly
+  (`meta_db = MetadataDB(CONFIG_DIR)`) instead of reading the module-level `CONFIG_DIR`,
+  which also means `lib/metadata_db.py` performs no IO at import (Principle V). Logging
+  still goes through the `feedBack.server` logger, so existing log filters and `caplog`
+  assertions resolve to the same logger object. `tests/test_settings_export_library_db.py`
+  now imports `_apply_pending_db_restore` from `metadata_db` (the test moved with its
+  subject); no other test changed. Every moved block is byte-identical to its
+  `server.py` original.
+
 ### Added
 - **Plugins can ship an ES-module `src/` tree (module-migration rails, R0).** The host gains three things so a plugin can move off a single global-scope `screen.js` IIFE onto native ES modules with **no build step**: (1) a new sandboxed `GET /api/plugins/{id}/src/{path}` route that serves a plugin's `src/` source subtree, containment-checked by the same `safe_join` guard as `assets/` (traversal/absolute/NUL → 404); (2) the live-edit cache contract — `Cache-Control: no-cache` + a weak mtime/size `ETag` + `If-None-Match`→`304` — applied to `src/`, `screen.js`, and `assets/` (previously `screen.js` sent no cache headers and `assets/` emitted an ETag but never revalidated), so an edited module reloads on refresh while unchanged ones `304`; and (3) `scriptType`/`minHost` passthrough from `plugin.json` to `/api/plugins`, with the loader injecting a plugin that declares `"scriptType":"module"` as `<script type="module">` (its screen.js becomes `import './src/main.js'`). A `<script type=module>` fires its load event only after its whole static-import graph evaluates, preserving the loader's completion-by-`onload` + `_loadingPluginId` contract. Classic plugins are unaffected; `minHost` is passthrough-only for now (enforcement deferred). Tests: `tests/test_plugin_src_route.py` (serve/media-type/traversal/304/no-stale-304/screen.js+assets conditional), `tests/js/plugin_loader_script_type.test.js` (guarded module injection).
 - **Module-migration governance & rails (R0).** Constitution amended to **v1.2.0**: Principle II now names native ES modules as a first-class, *build-free* extension mechanism (the `scriptType:"module"` load path, both plugins and — over time — core's `static/js/`), keeping the no-bundler/no-transpiler/source-served rule intact; Operating Constraints gains a "Module load contract" clause (a `<script type=module>` load event awaits the whole static-import graph, so completion-by-`onload` is preserved; per-visit re-init comes from the `screen:changed` event, not screen.js re-execution). Mirrored into `CLAUDE.md`. New `docs/plugin-modules.md` (the migration playbook — layering, import-time purity, `import.meta.url` assets, the ETag live-edit loop) and `docs/size-exemptions.md` (the signed 1,500-line size-norm register; Byron signs core/bundled rows, Christian the authored virtuoso row). Adds a **maintainer/CI-only** ESLint gate (`eslint.config.js` + a `lint` CI job): `max-lines` warns at 1,500 as a non-blocking ratchet (ceilings for exempt files mirror the register), and `import-x/no-unresolved` + `import-x/no-cycle` hard-error on ES-module graphs — dormant until module code lands, never on the serve/Docker path.
