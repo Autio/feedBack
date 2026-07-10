@@ -55,7 +55,7 @@ from dlc_paths import _get_dlc_dir, _resolve_dlc_path
 # Lives in lib/ because that is the one core dir every packaging path copies.
 import appstate
 # Extracted route modules. They import `appstate`, never `server` — one-way graph.
-from routers import audio_effects, artist_aliases, loops, playlists, ws_highway, chart, wanted
+from routers import audio_effects, artist_aliases, loops, playlists, ws_highway, chart, wanted, library_extras
 import sloppak as sloppak_mod
 import loosefolder as loosefolder_mod
 # Pure text-matching engine for MusicBrainz enrichment (P8): denoise/score/
@@ -4229,31 +4229,10 @@ async def list_library(q: str = "", page: int = 0, size: int = 24, sort: str = "
 # views is deferred to P5d — there's no server-side library event bus today, and
 # the drawer updates itself from these responses.
 
-@app.get("/api/work/{work_key:path}/charts")
-def api_get_work_charts(work_key: str):
-    """All charts in a work + which is the keeper (your pick vs auto-pick)."""
-    return meta_db.work_charts(work_key)
-
-
-@app.put("/api/work/{work_key:path}/preferred")
-def api_set_work_preferred(work_key: str, data: dict):
-    """Set the keeper chart of a work: body {filename}. The filename must be a
-    current member of the work. Returns the refreshed chart list."""
-    fn = (data.get("filename") or "").strip()
-    if not fn:
-        return JSONResponse({"error": "filename is required"}, 400)
-    members = {c["filename"] for c in meta_db.work_charts(work_key)["charts"]}
-    if fn not in members:
-        return JSONResponse({"error": "filename is not a chart of this work"}, 400)
-    meta_db.set_chart_preferred(work_key, fn)
-    return meta_db.work_charts(work_key)
-
-
-@app.delete("/api/work/{work_key:path}/preferred")
-def api_reset_work_preferred(work_key: str):
-    """Reset a work to auto-pick (drop the explicit preferred)."""
-    meta_db.clear_chart_preferred(work_key)
-    return meta_db.work_charts(work_key)
+# ── Small library / user-state endpoints (work prefs, favorites, tags, saved, session)
+# Mounted here; implementation in lib/routers/library_extras.py. Paths are all
+# distinct, so registering them together does not change routing.
+app.include_router(library_extras.router)
 
 
 # ── Chart-level endpoints (split/work/fileinfo) ──────────────────────────────
@@ -4394,14 +4373,6 @@ async def list_tuning_names(provider: str = "local"):
     return await _call_library_provider_async(library_provider, "tuning_names")
 
 
-@app.post("/api/favorites/toggle")
-def toggle_favorite(data: dict):
-    """Toggle a song's favorite status."""
-    filename = data.get("filename", "")
-    if not filename:
-        return {"error": "No filename"}
-    new_state = meta_db.toggle_favorite(filename)
-    return {"favorite": new_state}
 
 
 # ── Personal per-song metadata (difficulty / notes / tags) ───────────────────
@@ -4564,11 +4535,6 @@ def batch_song_user_meta(data: dict):
     return {"updated": n, "tags": meta_db.all_tags()}
 
 
-@app.get("/api/tags")
-def list_tags():
-    """All personal tags in use (over still-present songs), most-used first —
-    powers the tag filter UI."""
-    return {"tags": meta_db.all_tags()}
 
 
 # ── Artist aliases / Tidy-up (P4) ────────────────────────────────────────────
@@ -5359,19 +5325,6 @@ def api_delete_collection(pid: int):
     return {"ok": True}
 
 
-@app.post("/api/saved/toggle")
-def api_toggle_saved(data: dict):
-    """Add/remove a song on the reserved Saved-for-Later playlist."""
-    filename = _clean_str(data.get("filename"))
-    if not filename:
-        return JSONResponse({"error": "filename required"}, status_code=400)
-    return {"saved": meta_db.toggle_saved(filename)}
-
-
-@app.get("/api/session/continue")
-def api_session_continue():
-    """The Continue-Playing card's song (most recent play) or null."""
-    return meta_db.continue_session()
 
 
 # ── Wishlist / "wanted" API (feedBack#636 item 4) ─────────────────────────────
