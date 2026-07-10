@@ -85,35 +85,41 @@ async function clientMetrics() {
 // ── 2D highway per-frame draw cost (needs --song + a seeded library) ──────────
 async function frameTimeOnce(browser) {
     const page = await browser.newPage();
-    // Wrap rAF before any page script; mark frames the highway actually drew.
-    await page.addInitScript(() => {
-        window.__f = [];
-        window.__drew = false;
-        const raf = window.requestAnimationFrame.bind(window);
-        window.requestAnimationFrame = (cb) => raf((t) => {
+    let f, t2, notes;
+    try {
+        // Wrap rAF before any page script; mark frames the highway actually drew.
+        await page.addInitScript(() => {
+            window.__f = [];
             window.__drew = false;
-            const t0 = performance.now();
-            try { cb(t); } finally { window.__f.push({ ms: performance.now() - t0, drew: window.__drew }); }
+            const raf = window.requestAnimationFrame.bind(window);
+            window.requestAnimationFrame = (cb) => raf((t) => {
+                window.__drew = false;
+                const t0 = performance.now();
+                try { cb(t); } finally { window.__f.push({ ms: performance.now() - t0, drew: window.__drew }); }
+            });
         });
-    });
-    await page.goto(BASE, { waitUntil: 'networkidle', timeout: 60000 });
-    await page.evaluate(() => document.getElementById('v3-onboarding')?.remove());
-    await page.evaluate((s) => window.playSong(s), SONG);
-    await page.waitForFunction(() => (window.highway?.getNotes?.() || []).length >= 0 && window.highway?.getSongInfo?.(),
-        null, { timeout: 45000 }).catch(() => {});
-    await page.waitForFunction(() => (window.highway?.getNotes?.() || []).length > 0, null, { timeout: 45000 });
-    await page.evaluate(() => window.highway.addDrawHook(() => { window.__drew = true; }));
-    // Start playback so draw() leaves its paused-throttle path; confirm the clock advances.
-    await page.evaluate(async () => { const a = window.highway.getAudioElement?.(); if (a) a.muted = true; await a?.play?.(); });
-    await page.waitForTimeout(1500);
-    const t1 = await page.evaluate(() => window.highway.getTime());
-    await page.evaluate(() => { window.__f.length = 0; });
-    await page.waitForTimeout(FRAME_S * 1000);
-    const { f, t2, notes } = await page.evaluate(() => ({
-        f: window.__f.slice(), t2: window.highway.getTime(), notes: window.highway.getNotes().length,
-    }));
-    await page.close();
-    if (!(t2 > t1 + 1)) throw new Error(`clock did not advance (${t1}→${t2}) — measured the paused path`);
+        await page.goto(BASE, { waitUntil: 'networkidle', timeout: 60000 });
+        await page.evaluate(() => document.getElementById('v3-onboarding')?.remove());
+        await page.evaluate((s) => window.playSong(s), SONG);
+        await page.waitForFunction(() => (window.highway?.getNotes?.() || []).length >= 0 && window.highway?.getSongInfo?.(),
+            null, { timeout: 45000 }).catch(() => {});
+        await page.waitForFunction(() => (window.highway?.getNotes?.() || []).length > 0, null, { timeout: 45000 });
+        await page.evaluate(() => window.highway.addDrawHook(() => { window.__drew = true; }));
+        // Start playback so draw() leaves its paused-throttle path; confirm the clock advances.
+        await page.evaluate(async () => { const a = window.highway.getAudioElement?.(); if (a) a.muted = true; await a?.play?.(); });
+        await page.waitForTimeout(1500);
+        const t1 = await page.evaluate(() => window.highway.getTime());
+        await page.evaluate(() => { window.__f.length = 0; });
+        await page.waitForTimeout(FRAME_S * 1000);
+        ({ f, t2, notes } = await page.evaluate(() => ({
+            f: window.__f.slice(), t2: window.highway.getTime(), notes: window.highway.getNotes().length,
+        })));
+        if (!(t2 > t1 + 1)) throw new Error(`clock did not advance (${t1}→${t2}) — measured the paused path`);
+    } finally {
+        // Always close, even when an await above throws — otherwise a failing
+        // run leaks its page until the final browser.close().
+        await page.close();
+    }
     const drew = f.filter((x) => x.drew).map((x) => x.ms);
     return { drew, total: f.length, notes };
 }

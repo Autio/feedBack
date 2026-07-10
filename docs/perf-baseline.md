@@ -46,7 +46,7 @@ highway actually painted count (the other ~half are cheap no-op loops that would
 otherwise mask a regression). Any `highway.js` change must re-run this on the
 same machine and stay within noise of these numbers.
 
-```
+```bash
 node scripts/perf-baseline.mjs --base http://127.0.0.1:8300 \
     --song "Arcturus - The Sham Mirrors - Kinetic.feedpak"
 ```
