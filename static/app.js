@@ -4877,6 +4877,15 @@ window.jucePlayer = jucePlayer;
     // value change (this runs on a 350ms poll — logging every tick would
     // flood the diagnostics buffer).
     let _loggedOutputType;
+    // [asio-diag] verbose diagnostics, gated on --debug (preload exposes
+    // audio.debugEnabled). Resolved once at install; until it resolves the
+    // flag stays false and verbose lines are skipped. Shared with the
+    // renderer-bus feeder below via window._asioDiagEnabled.
+    let _asioDiag = false;
+    if (typeof juceApi.debugEnabled === 'function') {
+        juceApi.debugEnabled().then((v) => { _asioDiag = !!v; }).catch(() => {});
+    }
+    window._asioDiagEnabled = () => _asioDiag;
     async function _outputIsExclusive() {
         if (typeof juceApi.getCurrentDevice !== 'function') {
             if (_loggedOutputType !== '<no-getCurrentDevice>') {
@@ -4892,6 +4901,15 @@ window.jucePlayer = jucePlayer;
             if (t !== _loggedOutputType) {
                 _loggedOutputType = t;
                 console.log('[feedpak-route] outputType=', JSON.stringify(t), '→ exclusive=', excl);
+                // [asio-diag] full device object on every type change — shows
+                // the exact strings the predicate saw (inputType vs outputType,
+                // device names, duplex), so a driver reporting a non-'ASIO'
+                // type name is visible in tester logs.
+                if (_asioDiag) {
+                    try {
+                        console.log('[asio-diag] getCurrentDevice=', JSON.stringify(dev));
+                    } catch (_) { /* circular/hostile object — skip */ }
+                }
             }
             return excl;
         } catch (e) {
@@ -5376,6 +5394,13 @@ window.jucePlayer = jucePlayer;
         if (typeof ctx.setSinkId !== 'function') throw new Error('setSinkId unsupported');
         await ctx.setSinkId(exclusive ? { type: 'none' } : '');
         if (ctx.state !== 'running') await ctx.resume().catch(() => {});
+        // [asio-diag] a context left on the default sink while the bus is
+        // engaged is exactly the "song on the wrong device" symptom — record
+        // every successful sink flip (failures throw and are logged upstream).
+        if (window._asioDiagEnabled?.()) {
+            console.log('[asio-diag] setSink:', exclusive ? 'null-sink' : 'default',
+                'state=', ctx.state, 'rate=', ctx.sampleRate);
+        }
     }
 
     async function _disengage() {
@@ -5444,6 +5469,23 @@ window.jucePlayer = jucePlayer;
             if (running && exclusive) {
                 if (stems) want = 'stems';
                 else if (elementSong) want = 'element';
+            }
+
+            // [asio-diag] full decision vector, change-gated (500ms poll —
+            // steady state must not flood the buffer). This is the feeder-side
+            // counterpart of the watcher's [feedpak-route] decision line: it
+            // shows WHY the bus did or didn't engage (exclusive predicate,
+            // stems graph presence, native transport ownership, element song).
+            if (window._asioDiagEnabled?.()) {
+                const d = 'running=' + running + ' exclusive=' + exclusive
+                    + ' stems=' + !!stems + ' songAudio=' + !!songAudio
+                    + ' juceMode=' + !!window._juceMode
+                    + ' elementSong=' + elementSong
+                    + ' want=' + want + ' mode=' + _mode;
+                if (d !== window._lastRendererBusDecision) {
+                    window._lastRendererBusDecision = d;
+                    console.log('[asio-diag] renderer-bus:', d);
+                }
             }
 
             const stemsGraphChanged = _mode === 'stems' && stems !== _stemsGraph;
