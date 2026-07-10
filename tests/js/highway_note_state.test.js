@@ -39,7 +39,7 @@ test('highway declares the note-state provider slot', () => {
 
 test('public API exposes setNoteStateProvider / getNoteStateProvider / getNoteState / isDefaultRenderer', () => {
     const src = fs.readFileSync(highwayJs, 'utf8');
-    assert.match(src, /setNoteStateProvider\s*\(\s*fn\s*\)\s*\{[^}]*_noteStateProvider\s*=/, 'setNoteStateProvider must assign _noteStateProvider');
+    assert.match(src, /setNoteStateProvider\s*\(\s*fn\s*\)\s*\{[^}]*hwState\._noteStateProvider\s*=/, 'setNoteStateProvider must assign _noteStateProvider');
     assert.match(src, /setNoteStateProvider\s*\(\s*fn\s*\)\s*\{[^}]*typeof\s+fn\s*===\s*['"]function['"][^}]*:\s*null/, 'setNoteStateProvider must coerce non-functions (incl. null) to null');
     assert.match(src, /getNoteStateProvider\s*\(\s*\)\s*\{\s*return\s+hwState\._noteStateProvider/, 'getNoteStateProvider must return the slot');
     assert.match(src, /getNoteState\s*\(\s*note\s*,\s*chartTime\s*\)\s*\{\s*return\s+_noteState\s*\(/, 'getNoteState must delegate to _noteState');
