@@ -7,9 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The packaged desktop app could not start (`ModuleNotFoundError: No module named
+  'appstate'`).** feedback-desktop's `scripts/bundle-slopsmith.sh` copies a *hardcoded
+  list* of core files into the app bundle — `server.py`, `VERSION`, `lib/`, `data/`,
+  `static/`, `plugins/__init__.py`. The root-level `appstate.py` and `routers/` added in
+  R3 shipped correctly in Docker and passed every test, and were then silently dropped
+  from the packaged app, which died at startup. Both now live under **`lib/`** — the one
+  core directory the Dockerfile (`COPY lib/`), `docker-compose.yml`, and the desktop
+  bundler (`cp -r lib`) all copy wholesale, and that all three put on `sys.path` (on
+  Windows via the embeddable-Python `._pth`, where `PYTHONPATH` is ignored). This needs no
+  change in feedback-desktop and no new release to take effect. Placing them there is also
+  correct under Principle V: with the injection seam, `appstate.py` constructs nothing and
+  does no import-time IO, and a route module only builds an `APIRouter`. The
+  `Dockerfile` / `.dockerignore` / `docker-compose.yml` entries added for the root layout
+  are reverted. New `tests/test_packaging.py` walks `server.py`'s module-level imports and
+  fails if any first-party module resolves outside a directory the packagers copy, so the
+  next root-level module can't ship broken.
+
 ### Added
 - **`routers/` — the first extracted route module (R3).** The five audio-effects mapping
-  endpoints move out of `server.py` into `routers/audio_effects.py` as a
+  endpoints move out of `server.py` into `lib/routers/audio_effects.py` as a
   `fastapi.APIRouter`, mounted with `app.include_router(...)` **at the point in the file
   where they used to be defined** — FastAPI matches routes in registration order, so the
   mount site preserves it. Verified: the full 143-route table (paths, methods, *and*
@@ -19,8 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resolved at call time). This proves the seam from #833 under a real consumer, including
   the second slot. The `_demo_mode_guard` middleware still blocks all four moved write
   routes with 403, and `Query(...)` validation still 422s — both checked against a running
-  server. Ships via `COPY routers/ /app/routers/` plus `!routers/` + `!routers/**` in
-  `.dockerignore`. `server.py`: **9,445 → 9,386 lines**.
+  server. `server.py`: **9,445 → 9,386 lines**.
 - **`appstate.py` — the router seam (R3).** Route modules moving out of `server.py`
   need `meta_db` and friends but must not `import server`, or the import graph goes
   circular the moment `server` imports them back. So `server.py` keeps *constructing*
@@ -38,10 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both a later `configure()` and `monkeypatch.setattr` — the same read-only-binding trap
   as ES `import`. `configure()` rejects an unknown slot rather than silently creating a
   global nothing reads, and the suite asserts `server` actually calls it (a seam whose
-  wiring can no-op undetected is worse than no seam). Ships in the image via
-  `Dockerfile` `COPY appstate.py /app/` plus a `.dockerignore` allowlist entry — that
-  file opens with a blanket `*` exclusion, so root-level Python must be re-allowed
-  explicitly or the build fails.
+  wiring can no-op undetected is worse than no seam). Lives at `lib/appstate.py`.
 
 ### Changed
 - **`AudioEffectsMappingDB` moved out of `server.py` into `lib/audio_effects_db.py`

@@ -68,6 +68,7 @@ from metadata_db import (
 from audio_effects_db import AudioEffectsMappingDB
 # The router seam. Imported as a module (never `from appstate import ...`) so
 # `appstate.configure(...)` below publishes into the same namespace routers read.
+# Lives in lib/ because that is the one core dir every packaging path copies.
 import appstate
 # Extracted route modules. They import `appstate`, never `server` — one-way graph.
 from routers import audio_effects

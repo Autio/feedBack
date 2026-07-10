@@ -47,6 +47,15 @@ quietly operating on a stand-in.
 
 Slots are added here only when a router actually needs one — this is a seam,
 not a grab-bag for everything in ``server.py``.
+
+**Why this lives in ``lib/`` and not the repo root.** Because it constructs
+nothing and does no import-time IO, it satisfies Principle V's rule for ``lib/``
+modules — and ``lib/`` is the only core directory every packaging path already
+copies: the Dockerfile (``COPY lib/``), ``docker-compose.yml``, and
+feedback-desktop's ``bundle-slopsmith.sh`` (``cp -r lib``). All three also put
+both the bundle root and ``lib/`` on ``sys.path``. A root-level module ships in
+Docker but is silently dropped from the packaged desktop app, whose bundler
+copies a hardcoded file list — that regression is what moved this file here.
 """
 
 # The singletons routers may read. Every name here must also be a `_SLOTS` key.
