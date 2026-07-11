@@ -42,6 +42,21 @@ import {
 import { audio } from './js/audio-el.js';
 import { S } from './js/player-state.js';
 import {
+    _applyMastery,
+    _applyMasteryAvailability,
+    _autoplayExitEnabled,
+    _countdownBeforeSongEnabled,
+    _curPlaybackSpeed,
+    _exitConfirmEnabled,
+    _resetPlaybackSpeedForNewSong,
+    _showUpNextEnabled,
+    _wireSpeedPresetsOnce,
+    applySpeedPreset,
+    setMastery,
+    setSpeed,
+} from './js/player-controls.js';
+
+import {
     _cancelCountIn,
     armCreditsHideOnPlay,
     hideCountOverlay,
@@ -5170,15 +5185,6 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-// ── Autoplay & auto-exit (global option, default ON) ──────────────────
-// One toggle (`autoplayExit` in localStorage) that (a) auto-starts a song
-// once it's ready and (b) returns to the launching menu when the song
-// ends. Absence of the key means enabled. The behaviour lives in core
-// (app.js, shared by the v3 + classic UIs); the end-of-song *score*
-// screen, when present, is a plugin and hooks the contract below.
-function _autoplayExitEnabled() {
-    try { return localStorage.getItem('autoplayExit') !== '0'; } catch (_) { return true; }
-}
 // Settings checkbox setter (onchange="setAutoplayExit(this.checked)").
 window.setAutoplayExit = function (on) {
     try { localStorage.setItem('autoplayExit', on ? '1' : '0'); } catch (_) { /* private mode */ }
@@ -5191,15 +5197,6 @@ Object.defineProperty(window.feedBack, 'autoplayExit', {
     get: _autoplayExitEnabled, configurable: true,
 });
 
-// ── "Up Next" pill (global option, default ON) ────────────────────────
-// Gates the v3 player chrome's persistent upcoming-section pill
-// (#v3-upnext, driven by player-chrome.js's updateUpNext). Client-only
-// localStorage pref (`showUpNext`); absence of the key means enabled.
-// player-chrome.js reads window.feedBack.showUpNext each tick and hides
-// the pill when off.
-function _showUpNextEnabled() {
-    try { return localStorage.getItem('showUpNext') !== '0'; } catch (_) { return true; }
-}
 // Settings checkbox setter (onchange="setShowUpNext(this.checked)").
 window.setShowUpNext = function (on) {
     try { localStorage.setItem('showUpNext', on ? '1' : '0'); } catch (_) { /* private mode */ }
@@ -5217,12 +5214,6 @@ Object.defineProperty(window.feedBack, 'showUpNext', {
     get: _showUpNextEnabled, configurable: true,
 });
 
-// "Countdown before song" (Gameplay tab). Mirrored to localStorage by
-// loadSettings so the song-start path can read it synchronously here — no
-// async /api/settings fetch on the play hot path. Defaults off.
-function _countdownBeforeSongEnabled() {
-    try { return localStorage.getItem('countdownBeforeSong') === '1'; } catch (_) { return false; }
-}
 // Settings checkbox setter (onchange="setCountdownBeforeSong(this.checked)").
 // Writes localStorage for the synchronous read above AND persists to the
 // server so it survives a reload / rides along in the settings export bundle.
@@ -5378,13 +5369,6 @@ const _RESUME_END_GUARD_S = 5;                      // ignore basically-finished
 let _pendingResume = null;                          // {position, speed}, consumed at song:ready
 let _resumePillDismissed = false;                   // per-session: user waved off the current snapshot
 
-function _curPlaybackSpeed() {
-    try {
-        return window._juceMode
-            ? ((window.jucePlayer && window.jucePlayer._speed) || 1)
-            : (document.getElementById('audio')?.playbackRate || 1);
-    } catch (_) { return 1; }
-}
 
 // Snapshot the live session. Called from showScreen()'s teardown before
 // highway.stop()/audio unload, while getSongInfo() + position are still valid.
@@ -6088,15 +6072,6 @@ window.feedBack.playQueue = (function () {
     if (window.feedBack) window.feedBack.closeCurrentSong = queueAwareClose;
 })();
 
-// ── "Ask before leaving a song" (Gameplay tab, default OFF) ────────────────
-// Client-only localStorage pref (`confirmExitSong`); absence = OFF. When ON, a
-// *user-initiated* exit (Escape, or the player ✕) opens a small confirm instead
-// of leaving immediately. Auto-exit on song-end and a results screen's own
-// Close never prompt — they call closeCurrentSong() directly, which stays the
-// unguarded actual-exit.
-function _exitConfirmEnabled() {
-    try { return localStorage.getItem('confirmExitSong') === '1'; } catch (_) { return false; }
-}
 // Settings checkbox setter (onchange="setConfirmExitSong(this.checked)").
 window.setConfirmExitSong = function (on) {
     try { localStorage.setItem('confirmExitSong', on ? '1' : '0'); } catch (_) { /* private mode */ }
@@ -6217,175 +6192,13 @@ function _openExitConfirm() {
 }
 window._openExitConfirm = _openExitConfirm;   // exposed for tests/debugging
 
-const SPEED_PRESET_PCTS = [100, 90, 80, 75, 70, 60, 50];
-const SPEED_SNAP_THRESHOLD = 0.02;
-let _speedPresetsWired = false;
 
-function _speedPresetPctFromActive(activePctOrRate) {
-    if (!Number.isFinite(activePctOrRate)) return null;
-    const rate = activePctOrRate <= 1.5 ? activePctOrRate : activePctOrRate / 100;
-    for (const pct of SPEED_PRESET_PCTS) {
-        if (Math.abs(rate - pct / 100) <= SPEED_SNAP_THRESHOLD) return pct;
-    }
-    return null;
-}
 
-function _updateSpeedPresetButtons(activePctOrRate) {
-    const wrap = document.getElementById('speed-presets');
-    if (!wrap) return;
-    const target = _speedPresetPctFromActive(activePctOrRate);
-    for (const btn of wrap.querySelectorAll('[data-speed-preset]')) {
-        const pct = Number(btn.dataset.speedPreset);
-        btn.classList.toggle('v3-speed-preset-active', target !== null && pct === target);
-    }
-}
 
-function applySpeedPreset(percent) {
-    const slider = document.getElementById('speed-slider');
-    if (!slider) return;
-    const pct = Math.max(
-        Number(slider.min) || 15,
-        Math.min(Number(slider.max) || 150, Number(percent)),
-    );
-    if (!Number.isFinite(pct)) return;
-    slider.value = String(pct);
-    handleSliderInput(slider);
-    slider.dispatchEvent(new Event('input', { bubbles: true }));
-}
 window.applySpeedPreset = applySpeedPreset;
 
-function _wireSpeedPresetsOnce() {
-    if (_speedPresetsWired) return;
-    const presets = document.getElementById('speed-presets');
-    if (!presets) return;
-    _speedPresetsWired = true;
-    presets.addEventListener('click', (e) => {
-        const btn = e.target.closest('[data-speed-preset]');
-        if (!btn) return;
-        applySpeedPreset(Number(btn.dataset.speedPreset));
-    });
-}
 
-function setSpeed(v) {
-    const speedSlider = document.getElementById('speed-slider');
-    const rate = Number(v);
-    if (!Number.isFinite(rate)) {
-        return;
-    }
-    if (window._juceMode) {
-        window.jucePlayer?.setRate(rate);
-        const juceAudio = window.feedBackDesktop?.audio;
-        Promise.resolve()
-            .then(() => juceAudio?.setBackingSpeed(rate))
-            // Match the HTML5 path: preserve pitch on the JUCE backing track too.
-            // Optional-chained call is a no-op on desktop builds that predate
-            // setBackingPreservePitch, so this is safe to ship unconditionally.
-            .then(() => juceAudio?.setBackingPreservePitch?.(true))
-            .catch(err => console.warn('[setSpeed] backing speed/preserve-pitch failed:', err));
-    } else {
-        audio.playbackRate = rate;
-    }
-    const speedLabel = document.getElementById('speed-label');
-    if (speedLabel) speedLabel.textContent = rate.toFixed(2) + 'x';
-    handleSliderInput(speedSlider);
-    _updateSpeedPresetButtons(rate);
-}
 
-function _resetPlaybackSpeedForNewSong() {
-    // Reset the *actual* playback rate to 1x, not just the visible slider/label
-    // (feedBack#615). The HTML5 <audio> element and the desktop JUCE/backing
-    // engine each retain their own rate, and which one drives the next song
-    // isn't decided until later in the load, so reset all paths unconditionally.
-    // Every setter is idempotent and optional-chained, so this is safe in web
-    // and desktop builds alike — no need to branch on window._juceMode.
-    const speedSlider = document.getElementById('speed-slider');
-    if (speedSlider) speedSlider.value = 100;
-    audio.playbackRate = 1;
-    window.jucePlayer?.setRate?.(1);
-    const juceAudio = window.feedBackDesktop?.audio;
-    Promise.resolve()
-        .then(() => juceAudio?.setBackingSpeed?.(1))
-        .then(() => juceAudio?.setBackingPreservePitch?.(true))
-        .catch(err => console.warn('[resetSpeed] backing speed/preserve-pitch failed:', err));
-    // Mirror setSpeed's UI side-effects (label text + slider fill styling).
-    const speedLabel = document.getElementById('speed-label');
-    if (speedLabel) speedLabel.textContent = (1).toFixed(2) + 'x';
-    handleSliderInput(speedSlider);
-    _updateSpeedPresetButtons(100);
-}
-// Master-difficulty slider (feedBack#48). Persists partial via
-// /api/settings — the POST handler merges only the keys present, so
-// this fire-and-forget call doesn't clobber dlc_dir or other settings.
-//
-// Debounced trailing-edge (300ms) so dragging the slider — which fires
-// oninput per pixel — doesn't flood the server with concurrent writes
-// to config.json. highway.setMastery() still fires every oninput so
-// the chart re-filters in real time; only disk persistence waits.
-let _masteryPersistTimer = null;
-function _persistMastery(pct) {
-    if (_masteryPersistTimer) clearTimeout(_masteryPersistTimer);
-    _masteryPersistTimer = setTimeout(() => {
-        _masteryPersistTimer = null;
-        fetch('/api/settings', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ master_difficulty: pct }),
-        }).catch(() => { /* best-effort — next setMastery() will retry */ });
-    }, 300);
-}
-function setMastery(v) {
-    _applyMastery(v);
-}
-// Shared mastery applier. Master difficulty has two controls that write the
-// same master_difficulty key: the player-popover slider (#mastery-slider) and
-// the Gameplay-tab "Note highway speed" slider (#setting-highway-speed). Route
-// both — and loadSettings' hydration — through here so their positions,
-// labels, and track fills stay in sync regardless of which the user touches,
-// plus the live highway re-filter and the debounced persist. All element reads
-// are null-guarded since either control may be absent (follower window, or the
-// settings markup not yet rendered).
-function _applyMastery(v, opts = {}) {
-    // Guard + clamp: v might be a slider string, a programmatic call from a
-    // plugin, or a restored settings value with a bad shape. Don't let NaN
-    // reach a label (would show "NaN%") or the POST.
-    const parsed = parseInt(v, 10);
-    if (!Number.isFinite(parsed)) return;
-    const pct = Math.max(0, Math.min(100, parsed));
-    const popLabel = document.getElementById('mastery-label');
-    if (popLabel) popLabel.textContent = pct + '%';
-    const popSlider = document.getElementById('mastery-slider');
-    if (popSlider) {
-        if (String(popSlider.value) !== String(pct)) popSlider.value = pct;
-        handleSliderInput(popSlider);
-    }
-    const setSlider = document.getElementById('setting-highway-speed');
-    if (setSlider) {
-        if (String(setSlider.value) !== String(pct)) setSlider.value = pct;
-        handleSliderInput(setSlider);
-    }
-    // The Gameplay-tab label markup appends a literal "%" after this span
-    // (matching the av-offset "ms" pattern), so write the number alone here —
-    // unlike #mastery-label above, whose markup carries no trailing unit.
-    const setLabel = document.getElementById('setting-highway-speed-val');
-    if (setLabel) setLabel.textContent = pct;
-    highway.setMastery(pct / 100);
-    if (!opts.skipPersist) _persistMastery(pct);
-}
-// Reflect phrase-data availability on the slider after every `ready`.
-// The server omits the `phrases` message entirely for single-level
-// sources (GP imports, legacy sloppak), so hasPhraseData() is the
-// right signal to enable/disable the slider.
-function _applyMasteryAvailability(hasPhraseData) {
-    const slider = document.getElementById('mastery-slider');
-    if (!slider) return;
-    if (hasPhraseData) {
-        slider.disabled = false;
-        slider.title = 'Master difficulty — low = simpler chart, high = full';
-    } else {
-        slider.disabled = true;
-        slider.title = 'Source chart has a single difficulty level — slider disabled';
-    }
-}
 if (window.feedBack) {
     window.feedBack.on('song:loaded', syncDefaultArrangementPin);
     window.feedBack.on('arrangement:changed', syncDefaultArrangementPin);
@@ -7860,6 +7673,7 @@ configureHost({
     setPlayButtonState,
     _songEventPayload,
     togglePlay,
+    handleSliderInput,
     // count-in is a module now, so section-practice reaches it through the seam too —
     // these are simply count-in's own exports, handed across.
     startCountIn,
