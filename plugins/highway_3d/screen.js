@@ -3489,6 +3489,16 @@
                         // videoWidth === 0 until metadata lands — showing the
                         // plane before that paints a black flash over the plate.
                         const ready = !!el && el.videoWidth > 0;
+                        // venue-crowd.js swaps src on the same element (loop ↔
+                        // stinger); a new intrinsic size needs a fresh
+                        // cover-crop, which _bgFitBackdropPlane only reapplies
+                        // on camera aspect changes.
+                        if (ready && (layer.lastVidW !== el.videoWidth ||
+                                      layer.lastVidH !== el.videoHeight)) {
+                            layer.lastVidW = el.videoWidth;
+                            layer.lastVidH = el.videoHeight;
+                            layer.applyCoverCrop();
+                        }
                         const opacity = i === 0 ? 1 - _venueCrowdMix : _venueCrowdMix;
                         layer.mat.opacity = opacity;
                         layer.mesh.visible = ready && opacity > 0.01;

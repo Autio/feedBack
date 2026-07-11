@@ -110,6 +110,7 @@
     let _loadingLoop = null;    // loop currently waiting on canplaythrough
     let _fadingLoop = null;     // loop currently crossfading in (not yet active)
     let _stingerUntilEnded = false;
+    let _stingerGen = 0;        // identity for ended/timeout handlers
     let _lastStingerAt = -Infinity;
     let _prevStreak = 0;
     let _lastAccuracyPct = null; // from perf events; stats:recorded carries none
@@ -276,10 +277,15 @@
             _pendingLoop = null;
             showLoop(pending, FADE_MS);
         };
+        const myGen = ++_stingerGen;
         const back = () => {
-            if (!_stingerUntilEnded) return;
-            _stingerUntilEnded = false;
+            // Always detach: a handler left behind by a stop()/manifest swap
+            // must not fire into a LATER stinger's lifecycle on this reused
+            // element (the gen check below guards that; the boolean alone
+            // would pass once a new stinger is active).
             video.removeEventListener('ended', back);
+            if (_stingerGen !== myGen || !_stingerUntilEnded) return;
+            _stingerUntilEnded = false;
             // Fade back to the loop layer (which kept playing underneath).
             fadeMixTo(_activeLayer === 1 ? 1 : 0, STINGER_FADE_MS);
             flushPending();
@@ -344,6 +350,7 @@
     function stop() {
         cancelFade();
         _stopGen++;
+        _stingerGen++;
         _stingerUntilEnded = false;
         _pendingLoop = null;
         _loadingLoop = null;
