@@ -14,10 +14,16 @@ const vm = require('node:vm');
 const { extractFunction } = require('./test_utils');
 
 const APP_JS = path.join(__dirname, '..', '..', 'static', 'app.js');
+// _autoplayExitEnabled was carved out into static/js/player-controls.js (R3a); the
+// auto-exit machinery around it (_clearAutoExit, holdAutoExit, _resolvePlayerOrigin)
+// stayed in app.js.
+const CONTROLS_JS = path.join(__dirname, '..', '..', 'static', 'js', 'player-controls.js');
 const SRC = fs.readFileSync(APP_JS, 'utf8');
+// the module is ESM; these sandboxes evaluate plain script text
+const CONTROLS_SRC = fs.readFileSync(CONTROLS_JS, 'utf8').replace(/^export /gm, '');
 
 function runEnabled(stored) {
-    const fnSrc = extractFunction(SRC, 'function _autoplayExitEnabled(');
+    const fnSrc = extractFunction(CONTROLS_SRC, 'function _autoplayExitEnabled(');
     const sandbox = {
         localStorage: {
             getItem: () => {
