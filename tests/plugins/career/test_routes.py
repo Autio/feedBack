@@ -42,6 +42,16 @@ def test_unlock_flags_follow_thresholds(client, meta_db):
     assert by_id["arena"]["unlocked"] is False
 
 
+def test_orphaned_stats_do_not_count(client, meta_db):
+    # A song removed from the library (stats row survives the scan) must not
+    # keep contributing stars.
+    meta_db.add("gone.feedpak", "guitar", 0.99, in_library=False)
+    meta_db.add("here.feedpak", "guitar", 0.99)
+    state = client.get("/api/plugins/career/state").json()
+    assert state["stars_total"] == 3
+    assert "gone.feedpak" not in state["stars_per_song"]
+
+
 def test_no_stats_still_serves_state(client):
     state = client.get("/api/plugins/career/state").json()
     assert state["stars_total"] == 0

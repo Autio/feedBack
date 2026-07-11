@@ -70,8 +70,11 @@ def _stars():
     if db is None:
         return 0, {}
     thresholds = _state["content"]["star_accuracy_thresholds"]
+    # Existing-song filter: a scan hides (not deletes) stats of songs removed
+    # from the library, so orphaned rows must not keep counting toward stars.
     rows = db.conn.execute(
-        "SELECT filename, MAX(best_accuracy) FROM song_stats GROUP BY filename"
+        "SELECT filename, MAX(best_accuracy) FROM song_stats "
+        "WHERE filename IN (SELECT filename FROM songs) GROUP BY filename"
     ).fetchall()
     per_song = {}
     for filename, acc in rows:
