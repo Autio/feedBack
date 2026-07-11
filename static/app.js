@@ -4855,13 +4855,17 @@ window.jucePlayer = jucePlayer;
 // [asio-diag] global error tap: the 2026-07-11 tester log showed an uncaught
 // SyntaxError with no source location and the routing watcher/feeder never
 // installing — an error event carries filename:line even for parse errors in
-// other scripts, which console output does not. Unconditional (errors are
-// rare; one line each) so a broken script can never hide itself again.
+// other scripts, which console output does not. Gated on the desktop --debug
+// flag via window._asioDiagEnabled (installed just below; resolves async, so
+// errors thrown in the first ~second of a debug run may be missed — the
+// stale-cache class of failure reproduces on every later tick anyway).
 window.addEventListener('error', (e) => {
+    if (!window._asioDiagEnabled?.()) return;
     console.warn('[asio-diag] uncaught-error:', e.message,
         'at', (e.filename || '<unknown>') + ':' + (e.lineno || 0) + ':' + (e.colno || 0));
 });
 window.addEventListener('unhandledrejection', (e) => {
+    if (!window._asioDiagEnabled?.()) return;
     const r = e.reason;
     console.warn('[asio-diag] unhandled-rejection:',
         (r && (r.name + ': ' + r.message)) || String(r));
@@ -4870,13 +4874,15 @@ window.addEventListener('unhandledrejection', (e) => {
 (function _installJuceEngineRoutingWatcher() {
     const juceApi = window.feedBackDesktop?.audio;
     if (!juceApi || typeof juceApi.isAudioRunning !== 'function') {
-        // Expected in the Docker sphere; in the desktop app this means the
-        // preload bridge was missing when app.js ran — the whole exclusive
-        // reroute chain is dead and this line is the only witness.
-        console.log('[asio-diag] routing watcher NOT installed (no bridge: api=' + !!juceApi + ')');
+        // Desktop bridge present but audio API incomplete — the whole
+        // exclusive reroute chain is dead and this line is the only witness.
+        // (Docker sphere has no bridge at all: stay silent, nothing to
+        // diagnose there and no debug flag to gate on.)
+        if (window.feedBackDesktop) {
+            console.log('[asio-diag] routing watcher NOT installed (audio api incomplete)');
+        }
         return;
     }
-    console.log('[asio-diag] routing watcher installed');
 
     let _rerouteInFlight = false;
     // URL that JUCE's loadBackingTrack *explicitly rejected* (ok === false —
@@ -4905,7 +4911,13 @@ window.addEventListener('unhandledrejection', (e) => {
     // renderer-bus feeder below via window._asioDiagEnabled.
     let _asioDiag = false;
     if (typeof juceApi.debugEnabled === 'function') {
-        juceApi.debugEnabled().then((v) => { _asioDiag = !!v; }).catch(() => {});
+        juceApi.debugEnabled().then((v) => {
+            _asioDiag = !!v;
+            // Deferred install line: the flag resolves async, so logging at
+            // IIFE entry would race it. Change-detection isn't needed — this
+            // runs once per page load.
+            if (_asioDiag) console.log('[asio-diag] routing watcher installed');
+        }).catch(() => {});
     }
     window._asioDiagEnabled = () => _asioDiag;
     async function _outputIsExclusive() {
@@ -5328,13 +5340,22 @@ window.addEventListener('unhandledrejection', (e) => {
     const api = window.feedBackDesktop?.audio;
     if (!api || typeof api.setRendererBus !== 'function'
              || typeof api.pushRendererAudio !== 'function') {
-        console.log('[asio-diag] renderer-bus feeder NOT installed (api=' + !!api
-            + ' setRendererBus=' + typeof api?.setRendererBus
-            + ' pushRendererAudio=' + typeof api?.pushRendererAudio + ')');
+        // Silent in the Docker sphere (no bridge, no debug flag); a desktop
+        // bridge missing the bus API is the diagnostic case.
+        if (window.feedBackDesktop) {
+            console.log('[asio-diag] renderer-bus feeder NOT installed (api=' + !!api
+                + ' setRendererBus=' + typeof api?.setRendererBus
+                + ' pushRendererAudio=' + typeof api?.pushRendererAudio + ')');
+        }
         return;
     }
-    console.log('[asio-diag] renderer-bus feeder installed (loopback-capable='
-        + (typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function') + ')');
+    // Deferred like the watcher's install line: gate on the async debug flag.
+    if (typeof api.debugEnabled === 'function') {
+        api.debugEnabled().then((v) => {
+            if (v) console.log('[asio-diag] renderer-bus feeder installed (loopback-capable='
+                + (typeof window.navigator?.mediaDevices?.getDisplayMedia === 'function') + ')');
+        }).catch(() => {});
+    }
 
     const TAP_WORKLET = `
         class FeedbackBusTap extends AudioWorkletProcessor {
