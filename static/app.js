@@ -5418,7 +5418,9 @@ window.jucePlayer = jucePlayer;
             throw new Error('no loopback audio track');
         }
         try {
-            _lbCtx = _lbCtx || new AudioContext();
+            // Fresh context per session (not reused) so teardown's close()
+            // fully releases the tap worklet node — see _teardownLoopback.
+            _lbCtx = new AudioContext();
             if (_lbCtx.state !== 'running') await _lbCtx.resume().catch(() => {});
             const source = _lbCtx.createMediaStreamSource(stream);
             const tap = _makeTap(_lbCtx);
@@ -5445,6 +5447,13 @@ window.jucePlayer = jucePlayer;
         if (_lbTap) _lbTap.active = false;
         if (_lbStream) for (const t of _lbStream.getTracks()) t.stop();
         _lbStream = null; _lbTap = null;
+        // Close the capture context so its tap worklet node is released. The
+        // context is per-session (not reused): without this, each exclusive⇄
+        // shared switch orphaned a live worklet on a long-lived context.
+        if (_lbCtx) {
+            try { await _lbCtx.close(); } catch (_) { /* already closed */ }
+            _lbCtx = null;
+        }
         if (_lbPageMuted && typeof api.setPageMuted === 'function') {
             try { await api.setPageMuted(false); } catch (_) { /* engine gone */ }
         }
