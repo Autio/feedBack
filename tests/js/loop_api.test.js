@@ -11,11 +11,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+// The A-B loop was carved out of app.js into its own module (R3a). The
+// window.feedBack API surface it is published through stayed in app.js.
+const LOOPS_JS = path.join(__dirname, '..', '..', 'static', 'js', 'loops.js');
 const APP_JS = path.join(__dirname, '..', '..', 'static', 'app.js');
 
-function extractFunction(src, signature) {
+function extractFunction(rawSrc, signature) {
+    // loops.js is an ES module; the vm sandbox evaluates plain script text.
+    const src = rawSrc.replace(/^export /gm, '');
     const start = src.indexOf(signature);
-    if (start === -1) throw new Error(`extractFunction: '${signature}' not found in app.js`);
+    if (start === -1) throw new Error(`extractFunction: '${signature}' not found in static/js/loops.js`);
     let scan = start + signature.length;
     if (src[scan] === '(') {
         let parenDepth = 1;
@@ -89,6 +94,7 @@ function buildSandbox() {
         // updateLoopUI references formatTime for the label; we don't
         // assert on the label text in these tests, so a stub is enough.
         formatTime: (s) => String(s),
+        _updateEditRegionBtn: () => {},
         window: {
             feedBack: {
                 playback: {
@@ -96,6 +102,19 @@ function buildSandbox() {
                 },
             },
         },
+    };
+    // The loop module reaches back into app.js through the host seam
+    // (static/js/host.js), so the extracted bodies call host._audioSeek(),
+    // host._audioTime(), and so on. Point the seam at the SAME spies the sandbox
+    // already had: the assertions below are unchanged, they just travel through the
+    // indirection the real code now uses.
+    sandbox.host = {
+        _audioSeek: (...a) => sandbox._audioSeek(...a),
+        _audioTime: () => sandbox._audioTime(),
+        formatTime: (...a) => sandbox.formatTime(...a),
+        _updateEditRegionBtn: () => sandbox._updateEditRegionBtn(),
+        currentFilename: () => 'test-song.sloppak',
+        startCountIn: () => {},
     };
     vm.createContext(sandbox);
     return sandbox;
@@ -129,7 +148,7 @@ function loadFunctions(sandbox, src) {
 }
 
 test('setLoop mutates loopA/loopB and seeks to A', async () => {
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     loadFunctions(sandbox, src);
 
@@ -145,7 +164,7 @@ test('setLoop mutates loopA/loopB and seeks to A', async () => {
 test('setLoop returns false and leaves loopA/loopB untouched on cancelled seek', async () => {
     // Plugin-facing contract: cancelled seek (teardown gen bump) returns
     // false; the loop is NOT armed.
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     sandbox._audioSeek = () => Promise.resolve({ completed: false, from: NaN, to: NaN });
     loadFunctions(sandbox, src);
@@ -162,7 +181,7 @@ test('setLoop returns false and leaves loopA/loopB untouched on cancelled seek',
 test('setLoop returns false and leaves loopA/loopB untouched on off-target landing', async () => {
     // JUCE rollback / HTML5 clamp: completed:true but to drifts > 50ms
     // from the requested a. The loop is NOT armed.
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     sandbox._audioSeek = (s) => Promise.resolve({ completed: true, from: 0, to: s + 0.5 });
     loadFunctions(sandbox, src);
@@ -180,7 +199,7 @@ test('setLoop coerces string inputs (parseFloat-style)', async () => {
     // loadSavedLoop passes parseFloat(dataset.start) — but the dataset
     // values may already be strings. Number() coercion in setLoop must
     // accept finite numeric strings.
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     loadFunctions(sandbox, src);
 
@@ -191,7 +210,7 @@ test('setLoop coerces string inputs (parseFloat-style)', async () => {
 });
 
 test('setLoop rejects non-finite inputs', async () => {
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     loadFunctions(sandbox, src);
 
@@ -201,7 +220,7 @@ test('setLoop rejects non-finite inputs', async () => {
 });
 
 test('setLoop rejects b <= a', async () => {
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     loadFunctions(sandbox, src);
 
@@ -210,7 +229,7 @@ test('setLoop rejects b <= a', async () => {
 });
 
 test('clearLoop resets loopA/loopB to null (and asks section-practice to drop its selection)', async () => {
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     loadFunctions(sandbox, src);
 
@@ -231,7 +250,7 @@ test('clearLoop resets loopA/loopB to null (and asks section-practice to drop it
 });
 
 test('loop helpers emit transport snapshots by default and can suppress adapter echoes', async () => {
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const sandbox = buildSandbox();
     loadFunctions(sandbox, src);
 
@@ -269,7 +288,7 @@ test('loadSavedLoop funnels through setLoop (no duplicated UI mutation)', () => 
     // re-implementing the loopA/loopB assignment. Catches a future drift
     // where someone "fixes" loadSavedLoop and forgets to keep setLoop in
     // sync.
-    const src = fs.readFileSync(APP_JS, 'utf8');
+    const src = fs.readFileSync(LOOPS_JS, 'utf8');
     const fn = extractFunction(src, 'async function loadSavedLoop(');
     assert.match(fn, /await\s+setLoop\(/, 'loadSavedLoop must call setLoop');
     // The pre-refactor body assigned loopA = parseFloat(...) directly;
