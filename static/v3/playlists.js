@@ -11,8 +11,7 @@
     'use strict';
     const sm = window.feedBack;
 
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
 
     // Return null (don't throw) on a network/connection failure so a fetch
     // rejection can't abort rendering — matches the "degrades gracefully"

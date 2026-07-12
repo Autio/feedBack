@@ -18,8 +18,7 @@
     let _data = null;        // last GET /api/shop payload
     let _previewing = null;  // item id currently previewed (theme slot only)
 
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
     const fmtDb = (n) => Number(n || 0).toLocaleString() + ' dB';
 
     async function load() {

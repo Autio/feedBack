@@ -13,8 +13,7 @@
     let _profile = null;     // {display_name, avatar_url, player_hash, onboarded}
     let _progress = null;    // {level, xp, xp_in_level, xp_to_next, current_streak, best_streak}
 
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
 
     function avatarImg(url, sizeCls, shape) {
         shape = shape || 'rounded-full';

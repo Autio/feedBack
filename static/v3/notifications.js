@@ -18,8 +18,7 @@
 (function () {
     'use strict';
 
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
 
     function container() {
         let host = document.getElementById('fb-notify-stack');

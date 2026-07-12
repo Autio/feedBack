@@ -11,11 +11,15 @@
 (function () {
     'use strict';
 
-    // HTML-escape untrusted strings (plugin manifest id/label) before they go
-    // into innerHTML, so a hostile/buggy manifest can't inject markup or event
-    // attributes into the sidebar plugin nav.
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+    // HTML-escape untrusted strings before they go into innerHTML, so hostile
+    // or buggy data can't inject markup or event attributes. Published as
+    // window.fbEsc for the rest of the v3 layer: shell.js is the first v3
+    // script that needs it in index.html's defer list (defer scripts run in
+    // document order), so every later v3 script can alias it locally with
+    // `const esc = window.fbEsc;` instead of redefining its own copy.
+    window.fbEsc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
         { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
 
     // Plugin ids whose manifest declared `"fullscreen": true`. Populated from
     // /api/plugins in renderPromotedNav(); read by syncActive() to toggle the

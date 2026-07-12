@@ -19,8 +19,7 @@
 
     const SCREEN_ID = 'v3-feedbarcade';
     const sm = window.feedBack;
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
     const enc = encodeURIComponent;
 
     let _progress = null;   // /api/profile/progress  → header level/xp/streak

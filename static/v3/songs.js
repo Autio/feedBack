@@ -12,8 +12,7 @@
 (function () {
     'use strict';
     const sm = window.feedBack;
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
     const enc = encodeURIComponent;
     // Inverse of `enc` for matching a played song's filename back to a library
     // card. The `stats:recorded` event (like `song:loading`) carries the

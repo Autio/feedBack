@@ -56,6 +56,10 @@ function load(progressionState) {
     // Test call sites pass the raw payload; the handler must unwrap e.detail.
     sandbox.window.feedBack = { on: (name, fn) => { handlers[name] = (payload) => fn({ detail: payload }); } };
     sandbox.window.v3Progression = { get: () => progressionState };
+    // Shared HTML-escape helper, published by shell.js (which loads before
+    // notifications.js in index.html's defer list).
+    sandbox.window.fbEsc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     vm.createContext(sandbox);
     vm.runInContext(SRC, sandbox);
     const stack = () => sandbox.document.getElementById('fb-notify-stack');

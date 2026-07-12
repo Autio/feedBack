@@ -18,8 +18,7 @@
 (function () {
     'use strict';
     const sm = window.feedBack;
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
 
     const STRING_COUNTS = { guitar: [6, 7, 8], bass: [4, 5, 6] };
     const PATHWAY_OPTIONS = [

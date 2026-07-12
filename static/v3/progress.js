@@ -14,8 +14,7 @@
     const sm = window.feedBack;
     const SCREEN_ID = 'v3-progress';
 
-    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const esc = window.fbEsc;
 
     const fmtDb = (n) => Number(n || 0).toLocaleString() + ' dB';
 
