@@ -1261,6 +1261,13 @@ function createHighway() {
         }
     }
 
+    // Strip fills quantize to a handful of integer brightness levels; memoize
+    // the style strings so the 40-strip loop stops minting 40 strings a frame.
+    const _stripStyles = [];
+    function _stripStyle(b) {
+        return _stripStyles[b] || (_stripStyles[b] = `rgb(${b},${b},${b + 14})`);
+    }
+
     function drawHighway(W, H) {
         const strips = 40;
         for (let i = 0; i < strips; i++) {
@@ -1271,9 +1278,8 @@ function createHighway() {
 
             const hw0 = W * 0.26 * p0.scale;
             const hw1 = W * 0.26 * p1.scale;
-            const bright = 18 + 10 * p0.scale;
 
-            hwState.ctx.fillStyle = `rgb(${bright|0},${bright|0},${(bright+14)|0})`;
+            hwState.ctx.fillStyle = _stripStyle((18 + 10 * p0.scale) | 0);
             hwState.ctx.beginPath();
             hwState.ctx.moveTo(W/2 - hw0, p0.y * H);
             hwState.ctx.lineTo(W/2 + hw0, p0.y * H);
@@ -1350,13 +1356,14 @@ function createHighway() {
         }
     }
 
+    const _NOWLINE_GLOW = ['rgba(55,55,63,1)', 'rgba(40,40,48,1)', 'rgba(25,25,33,1)', 'rgba(10,10,18,1)'];
+
     function drawNowLine(W, H) {
         const y = H * 0.82;
         const hw = W * 0.26;
-        // Glow
+        // Glow (styles are constants — i is 1..4, so a is 55/40/25/10)
         for (let i = 1; i < 5; i++) {
-            const a = Math.max(0, 70 - i * 15);
-            hwState.ctx.strokeStyle = `rgba(${a},${a},${a+8},1)`;
+            hwState.ctx.strokeStyle = _NOWLINE_GLOW[i - 1];
             hwState.ctx.lineWidth = 1;
             hwState.ctx.beginPath();
             hwState.ctx.moveTo(W/2 - hw, y - i);
