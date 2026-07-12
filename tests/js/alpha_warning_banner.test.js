@@ -11,33 +11,35 @@ const vm = require('node:vm');
 const INDEX_HTML = path.join(__dirname, '..', '..', 'static', 'v3', 'index.html');
 const APP_JS = path.join(__dirname, '..', '..', 'static', 'app.js');
 
-test('index.html ships the alpha-warning banner inside the library section', () => {
+test('index.html ships the alpha-warning banner inside the v3 shell main pane', () => {
     const html = fs.readFileSync(INDEX_HTML, 'utf8');
 
-    // Locate the library section so we can prove the banner lives there
-    // and not stuck somewhere it would render off-screen.
-    const libStart = html.indexOf('id="library-section"');
-    assert.ok(libStart !== -1, 'library-section anchor not found in index.html');
-    const libEnd = html.indexOf('</section>', libStart);
-    assert.ok(libEnd !== -1, 'library-section closing tag not found');
-    const librarySection = html.slice(libStart, libEnd);
+    // Locate the v3 main pane so we can prove the banner lives there — above
+    // the screen containers, so it's visible on every screen — and not stuck
+    // somewhere it would render off-screen. (It used to live in the legacy
+    // #home library section, which is gone.)
+    const mainStart = html.indexOf('id="v3-main"');
+    assert.ok(mainStart !== -1, 'v3-main anchor not found in index.html');
+    const firstScreen = html.indexOf('class="screen', mainStart);
+    assert.ok(firstScreen !== -1, 'no screen container found after v3-main');
+    const mainTop = html.slice(mainStart, firstScreen);
 
     assert.match(
-        librarySection,
+        mainTop,
         /id="alpha-warning-banner"/,
-        'alpha-warning-banner must live inside library-section',
+        'alpha-warning-banner must live inside v3-main, above the screens',
     );
     // `hidden` Tailwind class must be present so the banner stays invisible
     // until JS opts it in via classList.toggle('hidden', false).
     assert.match(
-        librarySection,
+        mainTop,
         /id="alpha-warning-banner"[^>]*\bhidden\b/,
         'alpha-warning-banner must start with the `hidden` class',
     );
     // role="status" gives screen readers a non-interrupting announcement
     // rather than treating it as decorative.
     assert.match(
-        librarySection,
+        mainTop,
         /id="alpha-warning-banner"[^>]*role="status"/,
         'alpha-warning-banner must declare role="status"',
     );

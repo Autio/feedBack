@@ -130,17 +130,11 @@ import { configureHost } from './js/host.js';
 import { formatTime } from './js/format.js';
 import { L } from './js/library-state.js';
 import {
-    _LIB_FORMAT_KEY,
-    _LIB_FORMAT_VALUES,
-    _LIB_SORT_KEY,
-    _LIB_SORT_VALUES,
     _activeLibraryProviderId,
-    _applyLibFiltersToParams,
     _bumpLibNavGeneration,
     _getArrangementNamingMode,
     _lastLibSelected,
     _libNavItems,
-    _libScrollOnNextRender,
     _libraryLocalFilename,
     _libraryProviderApi,
     _librarySongArtUrl,
@@ -151,44 +145,28 @@ import {
     _onNamingModeChange,
     _pollScanAndRefresh,
     _providerSupports,
-    _readPersistedChoice,
     _removeLibCardsForFilename,
-    _renderLibFilterChips,
-    _resetLibraryProviderViewState,
     _setLibSelection,
     _setLibrarySyncState,
     _toggleHeader,
-    _updateLibFiltersBadge,
     checkScanAndLoad,
-    clearLibFilters,
     editBtn,
     filterFavTreeLetter,
     filterFavorites,
-    filterLibrary,
-    filterTreeLetter,
     fullRescanLibrary,
     goFavPage,
     goFavTreePage,
-    goTreePage,
     hideScanBanner,
-    libView,
     loadFavorites,
     loadLibrary,
     loadLibraryProviders,
-    loadTreeView,
     renderGridCards,
     renderTreeInto,
     rescanLibrary,
     setFavView,
-    setLibView,
-    setLibraryProvider,
     sortFavorites,
-    sortLibrary,
-    stopInfiniteScroll,
-    toggleAllArtists,
     toggleAllFavoriteArtists,
     toggleFavorite,
-    toggleLibFilters,
 } from './js/library.js';
 import {
     _editModalShouldClose,
@@ -314,17 +292,6 @@ const _LIB_PROVIDER_KEY = 'feedBack.libProvider';
 
 
   // cached from /api/library/tuning-names
-
-// ── Folder Library: filter bridge ─────────────────────────────────────────
-// Serialises the active lib filter state as URL params so the plugin can pass
-// them to /api/plugins/folder_library/tree — the same pattern grid and tree
-// views use when sending filter params to their own backend endpoints.
-window.feedBackLibFilterParams = function() {
-    var p = new URLSearchParams();
-    _applyLibFiltersToParams(p);
-    return p.toString();
-};
-
 
 // ── Grid View (server-side pagination, infinite scroll) ────────────────
 
@@ -666,7 +633,7 @@ function retuneSong(filename, title, tuning, target) {
                     <div class="text-3xl mb-3">✓</div>
                     <h3 class="text-lg font-bold text-white mb-1">Done!</h3>
                     <p class="text-sm text-gray-400 mb-5">${msg.filename}</p>
-                    <button onclick="document.getElementById('retune-modal').remove();loadLibrary()"
+                    <button onclick="document.getElementById('retune-modal').remove();window.feedBack?.emit('library:changed',{reason:'retune'})"
                         class="bg-accent hover:bg-accent-light px-6 py-2 rounded-xl text-sm font-semibold text-white transition">OK</button>
                 </div>`;
         }
@@ -1936,7 +1903,7 @@ registerShortcut({
     key: 'Escape',
     description: 'Go back to previous screen',
     scope: 'settings',
-    handler: () => showScreen(_settingsOriginScreen || 'home')
+    handler: () => showScreen(_settingsOriginScreen || 'v3-songs')
 });
 
 registerShortcut({
@@ -2102,13 +2069,11 @@ document.addEventListener('click', e => {
 (async () => {
     // Splitscreen pop-out windows (`?ssFollower=1`) load this same app but
     // get driven into "follower mode" by the splitscreen plugin once it
-    // loads — which is *after* this init runs. Without this, the library
-    // (`#home`, marked `active` in index.html) renders and paints first, so
-    // the popup briefly flashes the song grid before swapping to the player.
+    // loads — which is *after* this init runs. Without this, the default
+    // screen (`#v3-home`, marked `active` in index.html) renders and paints
+    // first, so the popup briefly flashes it before swapping to the player.
     // Switch to the player screen up front so the popup shows player chrome
-    // (empty, then populated by the plugin) the whole time. The wasted
-    // library fetch below is negligible next to the whole-app + every-plugin
-    // re-load a popup already does.
+    // (empty, then populated by the plugin) the whole time.
     const isFollowerWindow = (() => {
         try { return new URLSearchParams(location.search).get('ssFollower') === '1'; }
         catch (_) { return false; }
@@ -2122,35 +2087,6 @@ document.addEventListener('click', e => {
         catch (e) { console.warn('[feedBack] follower-window: showScreen("player") failed:', e); }
     }
     await loadLibraryProviders({ restoreSaved: true });
-    // Restore library-filter UI state from localStorage before the first
-    // grid fetch so the badge/chips are accurate immediately
-    // (feedBack#129).
-    _renderLibFilterChips();
-    _updateLibFiltersBadge();
-    // Restore the persisted sort and format-filter dropdowns BEFORE
-    // the first setLibView() call — setLibView triggers loadLibrary,
-    // which reads `lib-sort` / `lib-format` to build the API query
-    // string. Without this, the first page would always load with
-    // "Artist A-Z" / "All formats" regardless of what the user had
-    // picked previously.
-    const savedSort = _readPersistedChoice(_LIB_SORT_KEY, _LIB_SORT_VALUES, 'artist');
-    const savedFormat = _readPersistedChoice(_LIB_FORMAT_KEY, _LIB_FORMAT_VALUES, '');
-    const sortEl = document.getElementById('lib-sort');
-    const fmtEl = document.getElementById('lib-format');
-    if (sortEl) sortEl.value = savedSort;
-    if (fmtEl) fmtEl.value = savedFormat;
-    // Treat the initial page load the same as a screen entry so the
-    // restored selection scrolls into view exactly once on hard
-    // reload. Without this, the scroll-on-screen-entry flag only
-    // ever triggered when the user navigated away and back via
-    // showScreen — a hard refresh in tree mode would land on the
-    // top of the tree and force the user to scroll back to find
-    // their selection.
-    _libScrollOnNextRender.home = true;
-    // `libView` was already initialized from localStorage at module
-    // load; passing it through setLibView replays the visibility
-    // toggling and triggers the initial load.
-    setLibView(libView);
     try { await loadSettings(); } catch (e) { console.warn('initial loadSettings failed:', e); }
     // Re-apply any saved per-string highway colors to both highways.
     try { initHighwayColors(); } catch (e) { console.warn('initHighwayColors failed:', e); }
@@ -2175,8 +2111,8 @@ document.addEventListener('click', e => {
     _populateVizPicker(plugins);
     // Alpha-build heads-up banner — only revealed when the running version
     // string contains "alpha" (case-insensitive). Stays hidden on stable,
-    // beta, RC, or any other channel. The banner element lives in the
-    // library-section markup; toggling the `hidden` Tailwind utility is the
+    // beta, RC, or any other channel. The banner element lives at the top of
+    // the v3 shell's main pane; toggling the `hidden` Tailwind utility is the
     // entire surface area, so a test harness can sandbox this against a
     // minimal document stub.
     function _updateAlphaWarningBanner(version) {
@@ -2299,27 +2235,27 @@ configureHost({
 Object.assign(window, {
     _confirmDialog, _getArrangementNamingMode, _libraryLocalFilename, _librarySongArtUrl,
     _librarySongId, _onHeaderClick, _onNamingModeChange, _trapFocusInModal,
-    changeArrangement, checkPluginUpdates, clearLibFilters, clearLoop,
+    changeArrangement, checkPluginUpdates, clearLoop,
     deleteSelectedLoop, exportDiagnostics, exportSettings, filterFavorites,
-    filterLibrary, fullRescanLibrary, goFavPage, handleSliderInput,
+    fullRescanLibrary, goFavPage, handleSliderInput,
     hideScanBanner, importSettings, loadPlugins, loadSavedLoop,
     loadSettings, onSectionPracticeModeChange, openEditModal, persistSetting,
     pickDlcFolder, pinCurrentArrangementDefault, playSong, previewDiagnostics,
     previewEditArt, renderGridCards, renderTreeInto, rescanLibrary,
     retuneSong, saveCurrentLoop, saveSettings, seekBy,
-    setAvOffsetMs, setFavView, setInstrumentPathway, setLibView,
-    setLibraryProvider, setLoopEnd, setLoopStart, setMastery,
+    setAvOffsetMs, setFavView, setInstrumentPathway,
+    setLoopEnd, setLoopStart, setMastery,
     setSpeed, setViz, showScreen, sortFavorites,
-    sortLibrary, syncLibrarySong, toggleAllArtists, toggleAllFavoriteArtists,
-    toggleLibFilters, togglePlay, toggleSectionPracticePopover, uiPrompt,
+    syncLibrarySong, toggleAllFavoriteArtists,
+    togglePlay, toggleSectionPracticePopover, uiPrompt,
     updatePlugin, uploadSongs,
 
-    // These four are invisible to every static scan. app.js:2156-2157 picks the
-    // handler NAME at runtime —
-    //     const letterFn = favoritesOnly ? 'filterFavTreeLetter' : 'filterTreeLetter';
-    // — and interpolates it: `onclick="${letterFn}('A')"`. So the names never
-    // appear as identifiers anywhere, and ESLint / no-undef / a grep for
-    // `onclick="fn` all miss them. They are the library A-Z rail and its
-    // pagination; drop one and those buttons throw at click time, nowhere else.
-    filterFavTreeLetter, filterTreeLetter, goFavTreePage, goTreePage,
+    // These two are invisible to every static scan. library.js's renderTreeInto
+    // composes the handler NAMES into onclick="" strings at runtime —
+    //     `onclick="filterFavTreeLetter('A')"` / `onclick="goFavTreePage(2)"`
+    // — so the names never appear as identifiers anywhere, and ESLint /
+    // no-undef / a grep for `onclick="fn` all miss them. They are the
+    // favorites A-Z rail and its pagination; drop one and those buttons throw
+    // at click time, nowhere else.
+    filterFavTreeLetter, goFavTreePage,
 });

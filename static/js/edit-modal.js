@@ -5,8 +5,8 @@
 // the cleanest slice left, and it only became clean because the LIBRARY came out first (#896):
 // every dependency this modal has is now a module.
 //
-// It reads six bindings out of ./library.js (loadLibrary, loadFavorites, loadTreeView,
-// _removeLibCardsForFilename, libView, _lastLibSelected) and never writes one — checked, which
+// It reads four bindings out of ./library.js (loadLibrary, loadFavorites,
+// _removeLibCardsForFilename, _lastLibSelected) and never writes one — checked, which
 // matters: an imported binding is READ-ONLY, so a single write would have forced a setter or a
 // container. Every use is a read, so plain imports suffice.
 //
@@ -14,7 +14,7 @@
 import { _confirmDialog, _escAttr, _trapFocusInModal } from './dom.js';
 import { L } from './library-state.js';
 import {
-    _lastLibSelected, _removeLibCardsForFilename, libView, loadFavorites, loadLibrary, loadTreeView,
+    _lastLibSelected, _removeLibCardsForFilename, loadFavorites, loadLibrary,
 } from './library.js';
 
 // ── Edit metadata modal ─────────────────────────────────────────────────
@@ -235,24 +235,19 @@ export async function deleteSongFromModal(filename) {
     L.tuningNames = null;
 
     // Remove the deleted song's card from any currently-rendered grid/tree
-    // so the user sees it disappear without waiting for a refetch. A full
-    // loadLibrary() here would re-call loadGridPage(currentPage), which
-    // uses 'append' mode when currentPage > 0 and re-appends the same
-    // (now-shortened) page on top of what's already rendered — leaving
-    // the deleted card visible. Direct DOM removal also preserves scroll
-    // position, which a refetch from page 0 would lose.
+    // so the user sees it disappear without waiting for a refetch. Direct
+    // DOM removal also preserves scroll position, which a refetch from
+    // page 0 would lose.
     _removeLibCardsForFilename(filename);
 
-    // Tree views group by artist with song counts; a single card removal
-    // leaves stale counts, so refresh the tree for whichever screen we're
-    // looking at (each tree-view renderer replaces innerHTML cleanly).
+    // The favorites tree groups by artist with song counts; a single card
+    // removal leaves stale counts, so refresh it when we're looking at it.
     const activeScreen = document.querySelector('.screen.active');
     if (activeScreen?.id === 'favorites') {
         // loadFavorites() routes to either loadFavGridPage (always
         // 'replace') or loadFavTreeView — both safe for a single delete.
         loadFavorites();
-    } else if (libView === 'tree') {
-        loadTreeView();
     }
-    // Main library grid view: DOM removal above is sufficient.
+    // Elsewhere (the v3 Songs screen manages its own data): the DOM removal
+    // above is sufficient.
 }

@@ -111,7 +111,6 @@ test('library providers route through native library capability', () => {
     const libModule = source(LIBRARY_MODULE_JS);
     const librarySrc = source(LIBRARY_JS);
     const loader = region(libModule, 'async function loadLibraryProviders', 1800);
-    const selector = region(libModule, 'async function setLibraryProvider(providerId, options = {})', 1600);
     const sync = region(src, 'async function syncLibrarySong(providerId, songId', 1600);
 
     assert.match(librarySrc, /capabilities\.registerOwner\(['"]library['"]/);
@@ -119,7 +118,6 @@ test('library providers route through native library capability', () => {
     assert.match(librarySrc, /'library\.read': \['query-page', 'query-artists', 'query-stats', 'tuning-names'\]/);
     assert.match(librarySrc, /window\.feedBack\.libraryProviders\s*=\s*providerApi/);
     assert.match(loader, /api\.refresh\(\{ restoreSaved \}\)/);
-    assert.match(selector, /capabilityApi\.command\(['"]library['"],\s*['"]select-provider['"]/);
     assert.match(sync, /capabilityApi\.command\(['"]library['"],\s*['"]sync-song['"]/);
     assert.doesNotMatch(src, /_recordLegacyLibraryProviderShim/);
     assert.doesNotMatch(src, /_recordLegacyLibraryCommand/);

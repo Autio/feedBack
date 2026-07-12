@@ -177,18 +177,26 @@ test.describe('Keyboard Shortcuts', () => {
     await expect(page.locator('#shortcuts-modal')).toBeVisible();
   });
 
-  test('should focus library search for unshifted / without opening shortcut help', async ({ page }) => {
+  test('should focus favorites search for unshifted / without opening shortcut help', async ({ page }) => {
+    // The legacy #home library screen (and its #lib-filter) is gone; the
+    // favorites screen is the remaining legacy list screen with a search box
+    // wired to the `/` shortcut.
+    await page.evaluate(() => (window as any).showScreen('favorites'));
+    await page.waitForSelector('#favorites.active', { timeout: 5000 });
+
     await page.keyboard.press('/');
 
-    await expect(page.locator('#lib-filter')).toBeFocused();
+    await expect(page.locator('#fav-filter')).toBeFocused();
     await expect(page.locator('#shortcuts-modal')).toHaveCount(0);
   });
 
   test('should not open shortcut help for Shift+Slash while typing in search', async ({ page }) => {
-    await page.locator('#lib-filter').focus();
+    await page.evaluate(() => (window as any).showScreen('favorites'));
+    await page.waitForSelector('#favorites.active', { timeout: 5000 });
+    await page.locator('#fav-filter').focus();
 
     await page.evaluate(() => {
-      const input = document.getElementById('lib-filter');
+      const input = document.getElementById('fav-filter');
       input?.dispatchEvent(new KeyboardEvent('keydown', {
         key: '/',
         code: 'Slash',
@@ -198,7 +206,7 @@ test.describe('Keyboard Shortcuts', () => {
       }));
     });
 
-    await expect(page.locator('#lib-filter')).toBeFocused();
+    await expect(page.locator('#fav-filter')).toBeFocused();
     await expect(page.locator('#shortcuts-modal')).toHaveCount(0);
   });
 
@@ -206,8 +214,11 @@ test.describe('Keyboard Shortcuts', () => {
     // Linux/Electron reports Shift+/ as key='/', code='Slash'. The help
     // handler must open the modal AND stop the event so the shortcut
     // registry's plain `/` library-search shortcut can't also fire and pull
-    // focus to #lib-filter behind the modal (regression for the Copilot
+    // focus to the search box behind the modal (regression for the Copilot
     // review finding on this PR).
+    await page.evaluate(() => (window as any).showScreen('favorites'));
+    await page.waitForSelector('#favorites.active', { timeout: 5000 });
+
     await page.evaluate(() => {
       document.dispatchEvent(new KeyboardEvent('keydown', {
         key: '/',
@@ -219,7 +230,7 @@ test.describe('Keyboard Shortcuts', () => {
     });
 
     await expect(page.locator('#shortcuts-modal')).toBeVisible();
-    await expect(page.locator('#lib-filter')).not.toBeFocused();
+    await expect(page.locator('#fav-filter')).not.toBeFocused();
   });
 
   test('should trigger ? shortcut on player screen', async ({ page }) => {

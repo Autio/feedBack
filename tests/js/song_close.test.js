@@ -91,20 +91,20 @@ test('closeCurrentSong uses _playerOriginScreen when set', async () => {
     assert.equal(sandbox.__audioCurrentTimeSets.length, 0);
 });
 
-test('closeCurrentSong falls back to home when origin missing', async () => {
+test('closeCurrentSong falls back to the Songs list when origin missing', async () => {
     const src = fs.readFileSync(SESSION_JS, 'utf8');
     const sandbox = buildSandbox({ playerOriginScreen: null });
     loadClose(sandbox, src);
     await sandbox.__closeCurrentSong();
     assert.equal(sandbox.__showScreenCalls.length, 1);
-    assert.equal(sandbox.__showScreenCalls[0], 'home');
+    assert.equal(sandbox.__showScreenCalls[0], 'v3-songs');
 });
 
-test('closeCurrentSong falls back to home when origin is empty string', async () => {
+test('closeCurrentSong falls back to the Songs list when origin is empty string', async () => {
     const src = fs.readFileSync(SESSION_JS, 'utf8');
     const sandbox = buildSandbox({ playerOriginScreen: '' });
     loadClose(sandbox, src);
     await sandbox.__closeCurrentSong();
     assert.equal(sandbox.__showScreenCalls.length, 1);
-    assert.equal(sandbox.__showScreenCalls[0], 'home');
+    assert.equal(sandbox.__showScreenCalls[0], 'v3-songs');
 });

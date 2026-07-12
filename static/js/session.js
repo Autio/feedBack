@@ -78,34 +78,29 @@ import {
     togglePlay,
 } from './transport.js';
 import {
-    _activeLibraryProviderId,
     _bumpLibNavGeneration,
     _getArrangementNamingMode,
     _libScrollOnNextRender,
-    _resetLibraryProviderViewState,
     loadFavorites,
-    loadLibrary,
-    loadLibraryProviders,
-    stopInfiniteScroll,
 } from './library.js';
 import {
     S,
 } from './player-state.js';
-import {
-    L,
-} from './library-state.js';
 // Tracks which list screen launched the player so Esc-from-player
 // returns the user to that screen instead of always defaulting to
 // the Library (feedBack#126). Reset on every `playSong` call so a
 // song launched from a deep-link / plugin screen still gets a sane
-// fallback ('home').
-export let _playerOriginScreen = 'home';
+// fallback ('v3-songs', the Songs list).
+export let _playerOriginScreen = 'v3-songs';
 
-export let _settingsOriginScreen = 'home';
+export let _settingsOriginScreen = 'v3-songs';
 
 // ── Screen Navigation ─────────────────────────────────────────────────────
 export async function showScreen(id) {
-    // ── 'home' is the LEGACY library screen. Always route it to the v3 Songs list. ──
+    // ── 'home' is the LEGACY library screen id. Always route it to the v3 Songs list. ──
+    // The #home markup itself is gone from index.html, so this alias is now load-bearing
+    // for any plugin or stale caller still passing 'home': without it the
+    // getElementById(id) below would throw.
     //
     // The v3 shell replaced #home with #v3-songs. That mapping DID exist — but only inside
     // wrappers on `window.showScreen`, and only for callers that go through `window`:
@@ -169,29 +164,15 @@ export async function showScreen(id) {
     // generation so the next keypress doesn't reuse a cache built
     // against a now-hidden screen's container.
     _bumpLibNavGeneration();
-    if (id === 'home') {
-        _libScrollOnNextRender.home = true;
-        const beforeProviderId = _activeLibraryProviderId();
-        await loadLibraryProviders({ restoreSaved: true });
-        if (_activeLibraryProviderId() !== beforeProviderId) {
-            _resetLibraryProviderViewState();
-        } else {
-            L.libEpoch++;
-            L.currentPage = 0;
-            L.treeStats = null;
-            stopInfiniteScroll();
-        }
-        loadLibrary(0);
-    }
     if (id === 'favorites') { _libScrollOnNextRender.favorites = true; loadFavorites(); }
     if (id === 'settings') {
         // Record where we came from so Esc can go back. The player screen
         // is torn down by the `id !== 'player'` branch below, so
         // re-entering it via showScreen() would land on a dead screen —
-        // fall back to the player's own origin (or 'home') instead.
+        // fall back to the player's own origin (or 'v3-songs') instead.
         if (prevScreenId && prevScreenId !== 'settings') {
             _settingsOriginScreen = prevScreenId === 'player'
-                ? (_playerOriginScreen || 'home')
+                ? (_playerOriginScreen || 'v3-songs')
                 : prevScreenId;
         }
         loadSettings();
@@ -425,10 +406,10 @@ export async function _releaseWakeLock() {
 // library, even though the external tutorials plugin owns the playSong call.
 // Otherwise remember the actual launch screen; the element-exists guard
 // keeps the classic v2 UI (no #v3-* ids) from being stranded on a missing
-// screen, and unknown launches fall back to 'home'. The dashboard — classic
-// 'home' and the v3 shell's 'v3-home' — returns to the Songs list when it
-// exists (dashboard actions call playSong() directly, so its id is the
-// active screen at launch).
+// screen, and unknown launches fall back to 'v3-songs'. The dashboard —
+// the legacy 'home' alias and the v3 shell's 'v3-home' — returns to the
+// Songs list when it exists (dashboard actions call playSong() directly,
+// so its id is the active screen at launch).
 export function _resolvePlayerOrigin() {
     const override = window.feedBack && window.feedBack._nextReturnScreen;
     if (window.feedBack) window.feedBack._nextReturnScreen = null;
@@ -439,7 +420,7 @@ export function _resolvePlayerOrigin() {
         return ((launchId === 'home' || launchId === 'v3-home') && document.getElementById('v3-songs'))
             ? 'v3-songs' : launchId;
     }
-    return 'home';
+    return 'v3-songs';
 }
 
 // Autoplay: one-shot flag armed by each fresh playSong(), consumed by the
@@ -744,5 +725,5 @@ export function closeCurrentSong() {
     // A real close (user Escape/✕, or the queue-aware wrapper once the queue is
     // exhausted) abandons any play-queue so a stale one can't advance later.
     if (window.feedBack && window.feedBack.playQueue) window.feedBack.playQueue.clear();
-    return showScreen(_playerOriginScreen || 'home');
+    return showScreen(_playerOriginScreen || 'v3-songs');
 }

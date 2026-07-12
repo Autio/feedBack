@@ -1,6 +1,6 @@
 // Verify the autoplay & auto-exit option's pure decision helpers in app.js:
 //   - _autoplayExitEnabled()  (localStorage; absence = enabled)
-//   - _resolvePlayerOrigin()  (one-shot override → launch screen → 'home')
+//   - _resolvePlayerOrigin()  (one-shot override → launch screen → 'v3-songs')
 //
 // Same isolation strategy as song_close.test.js — extract the function from
 // app.js by brace-matching and run it in a vm sandbox with stubbed deps.
@@ -192,8 +192,8 @@ test('classic v2 (no #v3-songs) keeps home', () => {
     assert.equal(runResolve({ screens: ['home'], active: 'home' }).result, 'home');
 });
 
-test('player / unknown / no active screen fall back to home', () => {
-    assert.equal(runResolve({ screens: ['player'], active: 'player' }).result, 'home');
-    assert.equal(runResolve({ screens: [], active: 'plugin-x' }).result, 'home');
-    assert.equal(runResolve({ screens: [], active: null }).result, 'home');
+test('player / unknown / no active screen fall back to the Songs list', () => {
+    assert.equal(runResolve({ screens: ['player'], active: 'player' }).result, 'v3-songs');
+    assert.equal(runResolve({ screens: [], active: 'plugin-x' }).result, 'v3-songs');
+    assert.equal(runResolve({ screens: [], active: null }).result, 'v3-songs');
 });

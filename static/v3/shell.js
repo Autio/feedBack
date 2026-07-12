@@ -30,8 +30,8 @@
 
     // ── Navigation registry ────────────────────────────────────────────────
     // Each entry maps a stable hash key → a screen id (showScreen target) and a
-    // label. Legacy screens are reused: "Songs" = #home (library), "Favorites"
-    // = #favorites, "Settings" = #settings. New screens use #v3-* ids.
+    // label. Legacy screens are reused: "Favorites" = #favorites, "Settings"
+    // = #settings. New screens use #v3-* ids.
     const NAV = [
         { key: 'home',       screen: 'v3-home',          label: 'Home',            group: 'HOME',    icon: 'home' },
         { key: 'progress',   screen: 'v3-progress',      label: 'Progress',        group: 'HOME',    icon: 'trophy' },

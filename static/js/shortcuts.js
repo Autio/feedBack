@@ -72,7 +72,7 @@ export function _isShortcutHelpSuppressedTarget(el) {
     }
     if (tag === 'TEXTAREA') return true;
     if (el.isContentEditable) return true;
-    if (el.closest && el.closest('#lib-filter-drawer, [role="dialog"], #edit-modal, .feedBack-modal')) return true;
+    if (el.closest && el.closest('[role="dialog"], #edit-modal, .feedBack-modal')) return true;
     return false;
 }
 
@@ -82,7 +82,6 @@ export function _activeSearchInput() {
     // nothing — the shortcut only fires where a search box exists.
     const active = document.querySelector('.screen.active');
     if (!active) return null;
-    if (active.id === 'home') return document.getElementById('lib-filter');
     if (active.id === 'favorites') return document.getElementById('fav-filter');
     return null;
 }
@@ -122,7 +121,7 @@ export function _isInsideInteractiveControl(el) {
     const tag = el.tagName;
     if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(tag)) return true;
     if (el.isContentEditable) return true;
-    if (el.closest && el.closest('#lib-filter-drawer, [role="dialog"], #edit-modal')) return true;
+    if (el.closest && el.closest('[role="dialog"], #edit-modal')) return true;
     return false;
 }
 
@@ -324,7 +323,7 @@ export function _openShortcutsModal() {
         // Check if we're in tree view (not grid) on the active library screen
         const screen = document.querySelector('.screen.active');
         if (!screen) return false;
-        const tree = screen.querySelector('#lib-tree,#fav-tree');
+        const tree = screen.querySelector('#fav-tree');
         return tree && !tree.classList.contains('hidden');
     }
 
@@ -519,7 +518,7 @@ document.addEventListener('keydown', (e) => {
         // registry below) from also consuming this event — otherwise a
         // Linux/Electron Shift+Slash reported as key='/' opens help here and
         // then the registry's plain `/` library-search shortcut focuses
-        // #lib-filter behind the modal. (Copilot review on #602.)
+        // the search box behind the modal. (Copilot review on #602.)
         e.stopImmediatePropagation();
         _openShortcutsModal();
         return;
@@ -611,7 +610,7 @@ document.addEventListener('keydown', (e) => {
         // semantics (drawer close, screen back) are handled elsewhere; we
         // only act when a search box is the focused element.
         const ae = document.activeElement;
-        if (ae && (ae.id === 'lib-filter' || ae.id === 'fav-filter')) {
+        if (ae && ae.id === 'fav-filter') {
             if (ae.value) {
                 ae.value = '';
                 ae.dispatchEvent(new Event('input', { bubbles: true }));
@@ -793,7 +792,7 @@ export function _getCurrentContext() {
         windowId: window.getShortcutWindowId(),
         activePanel: _activePanel,
         isPlayer: currentScreen === 'player',
-        isLibrary: ['home', 'favorites'].includes(currentScreen),
+        isLibrary: currentScreen === 'favorites',
         isSettings: currentScreen === 'settings',
         isPlugin: currentScreen?.startsWith('plugin-')
     };

@@ -1,8 +1,10 @@
-// The song library: the grid, the artist tree, the A-Z rail, filters, pagination,
-// selection, favourites, the scan banner, and the library-provider plumbing.
+// The library module: the Favorites screen (grid + artist tree + A-Z rail +
+// pagination), selection/keyboard-nav state, the scan banner, and the
+// library-provider plumbing. The legacy #home library screen this module also
+// used to drive was removed (the v3 Songs screen — static/v3/songs.js —
+// replaced it), so everything here is favorites-scoped or shared plumbing.
 //
-// The single biggest slice of the carve — 145 declarations, and by a wide margin the last
-// large coherent thing left in app.js.
+// Originally the single biggest slice of the carve out of app.js.
 //
 // A LOW module: it imports only leaves (./dom.js, ./format.js, ./library-state.js,
 // ./tuning-display.js — all four import nothing themselves) and needs NO host hooks at
@@ -19,14 +21,13 @@
 //
 // ─── ON THE EXPORT LIST ──────────────────────────────────────────────────────
 //
-// 60 exports, and 43 of them CANNOT be found by a call-graph scan. They are referenced
+// Many exports CANNOT be found by a call-graph scan. They are referenced
 // only from app.js's TOP-LEVEL statements — the Object.assign(window, {...}) contract and
 // the scattered window.X = X lines — which live outside every function, so a closure walk
-// over declarations never sees them. Among them are the four handler names that app.js
-// composes AT RUNTIME into onclick="" strings (filterTreeLetter, filterFavTreeLetter,
-// goTreePage, goFavTreePage): the library A-Z rail and its pagination. No static tool can
-// see those at all. Miss them and the rail silently stops working on click, with nothing
-// failing in CI.
+// over declarations never sees them. Among them are the two handler names that this module
+// composes AT RUNTIME into onclick="" strings (filterFavTreeLetter, goFavTreePage): the
+// favorites A-Z rail and its pagination. No static tool can see those at all. Miss them
+// and the rail silently stops working on click, with nothing failing in CI.
 import { _escAttr, _isElementVisible, esc } from './dom.js';
 import { formatTime } from './format.js';
 import { L } from './library-state.js';
@@ -50,10 +51,7 @@ export function _libNavItems() {
     const active = document.querySelector('.screen.active');
     if (!active) return { items: [], container: null, mode: null };
     let tree, grid;
-    if (active.id === 'home') {
-        tree = document.getElementById('lib-tree');
-        grid = document.getElementById('lib-grid');
-    } else if (active.id === 'favorites') {
+    if (active.id === 'favorites') {
         tree = document.getElementById('fav-tree');
         grid = document.getElementById('fav-grid');
     } else {
@@ -61,8 +59,8 @@ export function _libNavItems() {
     }
     const treeMode = tree && !tree.classList.contains('hidden');
     const scope = treeMode ? tree : grid;
-    // Cache key includes the active container — switching grid↔tree or
-    // home↔favorites must miss even if the generation hasn't ticked.
+    // Cache key includes the active container — switching grid↔tree
+    // must miss even if the generation hasn't ticked.
     if (
         _libNavItemsCache.gen === _libNavGeneration &&
         _libNavItemsCache.scope === scope &&
@@ -103,27 +101,23 @@ export function _libNavItems() {
 // libraries make that a noticeable hot path.
 export let _lastLibSelected = null;
 
-// One-shot flag set in `showScreen` when the user enters Home or
-// Favorites. Consumed by the very next library render so the
-// restored selection scrolls into view exactly once on screen entry
-// (player → home, hard reload). Routine re-renders driven by
-// search / sort / filter changes leave the user's scroll position
+// One-shot flag set in `showScreen` when the user enters Favorites.
+// Consumed by the very next favorites render so the restored
+// selection scrolls into view exactly once on screen entry
+// (player → favorites, hard reload). Routine re-renders driven by
+// search / sort changes leave the user's scroll position
 // alone — the highlight still re-applies, but they aren't yanked.
-export const _libScrollOnNextRender = { home: false, favorites: false };
+export const _libScrollOnNextRender = { favorites: false };
 
-// localStorage keys for "remember the last selection across reloads
-// and after returning from the player". One key per screen so the
-// Library and Favorites trees don't fight over the same slot. Only
-// song-row / song-card selections are persisted — header selections
-// in the tree are ephemeral by design (re-derived from arrow nav).
-const _LIB_SELECTED_KEY = 'feedBack.libLastSelected';
-
+// localStorage key for "remember the last selection across reloads
+// and after returning from the player". Only song-row / song-card
+// selections are persisted — header selections in the tree are
+// ephemeral by design (re-derived from arrow nav).
 const _FAV_SELECTED_KEY = 'feedBack.favLastSelected';
 
 function _selectedKeyForActiveScreen() {
     const active = document.querySelector('.screen.active');
     if (!active) return null;
-    if (active.id === 'home') return _LIB_SELECTED_KEY;
     if (active.id === 'favorites') return _FAV_SELECTED_KEY;
     return null;
 }
@@ -218,15 +212,14 @@ function _scrollSelectionIntoView(el) {
     }
 }
 
-function _restoreLibSelection(scopeEl, screen, { scroll = true } = {}) {
+function _restoreLibSelection(scopeEl, { scroll = true } = {}) {
     // Re-apply the persistent `.selected` class to whichever song
     // matches the saved filename. For the tree we also walk up and
     // open every collapsed ancestor so the restored row is actually
     // visible — the user shouldn't have to hunt for their place
     // inside a collapsed artist node.
     if (!scopeEl) return null;
-    const key = screen === 'favorites' ? _FAV_SELECTED_KEY : _LIB_SELECTED_KEY;
-    const saved = _loadPersistedLibSelection(key);
+    const saved = _loadPersistedLibSelection(_FAV_SELECTED_KEY);
     if (!saved || (!saved.f && !saved.s)) return null;
     // Match by dataset values — both stored and DOM values are in the
     // encoded form, so no decoding is needed. Avoid interpolating persisted
@@ -311,44 +304,16 @@ export function _moveSelectionInItems(items, deltaIdx) {
     return true;
 }
 
-// Persist the view toggle (grid vs tree), sort selection, and format
-// filter across reloads. Stored as separate keys (rather than one
-// blob) so future controls can opt in independently and a corrupted
-// single value doesn't wipe the rest. Validation lives at the read
-// site — we coerce unknown values back to safe defaults rather than
-// trusting whatever happens to be in localStorage.
-const _LIB_VIEW_KEY = 'feedBack.libView';
-
-export const _LIB_SORT_KEY = 'feedBack.libSort';
-
-export const _LIB_FORMAT_KEY = 'feedBack.libFormat';
-
-const _LIB_VIEW_VALUES = new Set(['grid', 'tree', 'folder']);
-
-export const _LIB_SORT_VALUES = new Set([
-    'artist', 'artist-desc', 'title', 'title-desc',
-    'recent', 'year-desc', 'year', 'tuning',
-    'difficulty', 'difficulty-desc',
-]);
-
-export const _LIB_FORMAT_VALUES = new Set(['', 'sloppak', 'loose']);
-
-// Tree-view expand/collapse persistence. Three states per tree:
+// Tree-view expand/collapse persistence. Three states:
 //   '1'  → user asked to expand all
 //   '0'  → user asked to collapse all
 //   null → no explicit choice; renderTreeInto's existing heuristic
 //          (auto-open when search active or few artists) wins
-//
-// Library and Favorites are separate trees with separate
-// Expand/Collapse buttons, so each gets its own key — toggling one
-// must not flip the other's persisted state.
-const _LIB_TREE_EXPAND_KEY = 'feedBack.libTreeExpand';
-
 const _FAV_TREE_EXPAND_KEY = 'feedBack.favTreeExpand';
 
 const _LIB_TREE_EXPAND_VALUES = new Set(['1', '0']);
 
-export function _readPersistedChoice(key, allowed, fallback) {
+function _readPersistedChoice(key, allowed, fallback) {
     try {
         const v = localStorage.getItem(key);
         return v !== null && allowed.has(v) ? v : fallback;
@@ -405,33 +370,11 @@ export function _providerSupports(providerId, capability) {
     return !!provider && Array.isArray(provider.capabilities) && provider.capabilities.includes(capability);
 }
 
-function _applyLibraryProviderToParams(params) {
-    params.set('provider', _activeLibraryProviderId());
-    return params;
-}
-
-export function _resetLibraryProviderViewState() {
+function _resetLibraryProviderViewState() {
     L.libEpoch++;
     L.currentPage = 0;
-    _treePage = 0;
     L.treeStats = null;
     L.tuningNames = null;
-    stopInfiniteScroll();
-}
-
-function _renderLibraryProviderSelector() {
-    const select = document.getElementById('lib-provider');
-    const title = document.getElementById('lib-title');
-    const activeProvider = _activeLibraryProvider();
-    const providers = _libraryProviderSnapshot().providers || [];
-    if (select) {
-        select.innerHTML = providers.map(provider =>
-            `<option value="${_escAttr(provider.id)}">${esc(provider.label || provider.id)}</option>`
-        ).join('');
-        select.value = activeProvider.id;
-        select.classList.toggle('hidden', providers.length <= 1);
-    }
-    if (title) title.textContent = activeProvider.id === 'local' ? 'Your Library' : (activeProvider.label || activeProvider.id);
 }
 
 export async function loadLibraryProviders({ restoreSaved = false, reloadOnChange = false } = {}) {
@@ -441,51 +384,11 @@ export async function loadLibraryProviders({ restoreSaved = false, reloadOnChang
         await api.refresh({ restoreSaved });
     }
 
-    _renderLibraryProviderSelector();
     const afterProviderId = _activeLibraryProviderId();
     if (reloadOnChange && afterProviderId !== beforeProviderId) {
         _resetLibraryProviderViewState();
         loadLibrary(0);
     }
-}
-
-export async function setLibraryProvider(providerId, options = {}) {
-    const beforeProviderId = _activeLibraryProviderId();
-    try {
-        const capabilityApi = window.feedBack && window.feedBack.capabilities;
-        if (capabilityApi && typeof capabilityApi.command === 'function') {
-            await capabilityApi.command('library', 'select-provider', {
-                requester: 'app.library',
-                target: { providerId },
-                payload: options && typeof options === 'object' ? options : {},
-            });
-        } else {
-            _libraryProviderApi()?.select?.(String(providerId || ''));
-        }
-    } catch (err) {
-        // Reached from an inline onchange="setLibraryProvider(this.value)"
-        // handler that does not await us, so a rejection would otherwise
-        // surface as an unhandled promise rejection. Log and bail without a
-        // reload. Re-render the selector so the <select> snaps back to the
-        // still-active provider — the onchange already moved its displayed
-        // value to the (failed) selection, which would otherwise leave the
-        // dropdown showing a provider that was never actually selected.
-        console.error('setLibraryProvider: failed to select provider', providerId, err);
-        _renderLibraryProviderSelector();
-        return;
-    }
-    if (beforeProviderId === _activeLibraryProviderId()) {
-        // The active provider didn't change — either a genuine no-op, or the
-        // capability command degraded/no-op'd without throwing (e.g. an
-        // unknown provider returns a "degraded" outcome rather than rejecting).
-        // The inline onchange already moved the <select>'s displayed value, so
-        // re-render to snap it back to the provider that is actually active.
-        _renderLibraryProviderSelector();
-        return;
-    }
-    _renderLibraryProviderSelector();
-    _resetLibraryProviderViewState();
-    loadLibrary(0);
 }
 
 function _libraryProviderIdForSong(song, fallbackProviderId) {
@@ -577,16 +480,12 @@ function _librarySyncStatusMarkup(providerId, songId, layout = 'block') {
     return `<span data-library-sync-status role="status" aria-live="polite" data-library-sync-provider="${encodeURIComponent(providerId)}" data-library-sync-song="${encodeURIComponent(songId)}" class="${_librarySyncStatusClass(state, layout)}">${esc(_librarySyncStatusText(state))}</span>`;
 }
 
-export let libView = _readPersistedChoice(_LIB_VIEW_KEY, _LIB_VIEW_VALUES, 'grid');
-
 const PAGE_SIZE = 24;
 
 // Tree letter selection persists across reloads / coming back from
 // the player so the user lands on the same alphabet group they
 // picked. Validation: any single uppercase letter, or `#` for
 // non-alphabetical artists, or `''` for the All bucket.
-const _LIB_TREE_LETTER_KEY = 'feedBack.libTreeLetter';
-
 const _FAV_TREE_LETTER_KEY = 'feedBack.favTreeLetter';
 
 function _readPersistedLetter(key) {
@@ -600,25 +499,11 @@ function _writePersistedLetter(key, value) {
     try { localStorage.setItem(key, value || ''); } catch { /* private mode / quota */ }
 }
 
-let _treeLetter = _readPersistedLetter(_LIB_TREE_LETTER_KEY);
-
-let _debounceTimer = null;
-
-let _loadingMore = false;
-
-let _hasMore = true;
-
-let _gridObserver = null;
-
-// ── Library filters (feedBack#129/#69) ────────────────────────────────
+// ── Arrangement naming mode (smart vs legacy) ─────────────────────────
 //
-// Filter state lives in a single object so the active set can be
-// serialized to localStorage as one key. Each axis is OR-within (Lead
-// + Rhythm = "has Lead OR Rhythm"); cross-axis is AND. Tri-state pills
-// translate to `_has` / `_lacks` lists on the wire so the server's
-// SQL doesn't have to encode the third "any" state.
-// In smart mode Combo is subsumed into Lead; only show Lead/Rhythm/Bass.
-// In legacy mode keep the original four values.
+// In smart mode 'Combo' is subsumed into 'Lead'; legacy keeps the
+// original four values. Governs the arrangement badges the favorites
+// grid/tree render and the naming_mode query param the player sends.
 // In-memory cache so a localStorage.setItem failure (private mode / quota /
 // disabled storage) still keeps the chosen mode for the rest of the session.
 // Initialised lazily from localStorage on first read.
@@ -636,34 +521,16 @@ export function _getArrangementNamingMode() {
     return _arrangementNamingMode;
 }
 
-// In smart mode 'Combo' is subsumed into 'Lead' (_ensure_smart_names maps it
-// the same way). Normalize any persisted 'Combo' tokens before querying or
-// rendering so the UI and the server stay in sync.
-function _toSmartArrs(arr) {
-    return arr.map(a => a === 'Combo' ? 'Lead' : a);
-}
-
 export function _onNamingModeChange(value) {
     const mode = value === 'legacy' ? 'legacy' : 'smart';
     _arrangementNamingMode = mode;
     try { localStorage.setItem('arrangementNamingMode', mode); } catch (_) {}
-    if (mode === 'smart') {
-        _libFilters.arrHas   = _toSmartArrs(_libFilters.arrHas);
-        _libFilters.arrLacks = _toSmartArrs(_libFilters.arrLacks);
-        _saveLibFilters();
-    }
-    _renderLibFilterDrawer();
-    _renderLibFilterChips();
+    // Drop cached stats and bump the epoch so the next favorites / folder
+    // render refetches with the new naming mode.
     L.libEpoch++;
     L.currentPage = 0;
     L.treeStats = null;
     loadLibrary(0);
-}
-
-function _getArrangements() {
-    return _getArrangementNamingMode() === 'smart'
-        ? ['Lead', 'Rhythm', 'Bass']
-        : ['Lead', 'Rhythm', 'Bass', 'Combo'];
 }
 
 function _arrangementBadgeHtml(arrangement, nm) {
@@ -675,385 +542,13 @@ function _arrangementBadgeHtml(arrangement, nm) {
     return `<span class="px-1.5 py-0.5 rounded ${cls}">${esc(label)}</span>`;
 }
 
-// Stem ids match the bare strings sloppak manifests use ("drums",
-// "bass", etc.). `full` is intentionally omitted from the filter UI:
-// it's the fallback mix every sloppak ships with, so filtering by it
-// would match all sloppaks and confuse users.
-const _STEM_DEFS = [
-    { id: 'drums', label: 'Drums' },
-    { id: 'bass', label: 'Bass' },
-    { id: 'vocals', label: 'Vocals' },
-    { id: 'guitar', label: 'Guitar' },
-    { id: 'piano', label: 'Piano' },
-    { id: 'other', label: 'Other' },
-];
-
-const _LIB_FILTERS_KEY = 'feedBack.libFilters';
-
-let _libFilters = _loadLibFilters();
-
-function _defaultLibFilters() {
-    return {
-        arrHas: [], arrLacks: [],
-        stemsHas: [], stemsLacks: [],
-        lyrics: null,             // null | 1 | 0
-        tunings: [],
-    };
-}
-
-function _normalizeStringArray(v) {
-    return Array.isArray(v) ? v.filter(x => typeof x === 'string' && x) : [];
-}
-
-function _normalizeLibFilters(parsed) {
-    // Defensive: a stale or hand-edited localStorage payload could have
-    // any shape. Without normalization a later `.join` or `.includes`
-    // on a non-array would throw at filter-apply time. Coerce each
-    // field back to its expected type, dropping anything we don't
-    // recognize. FeedBack#134 review.
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        return _defaultLibFilters();
-    }
-    const lyrics = parsed.lyrics;
-    return {
-        arrHas: _normalizeStringArray(parsed.arrHas),
-        arrLacks: _normalizeStringArray(parsed.arrLacks),
-        stemsHas: _normalizeStringArray(parsed.stemsHas),
-        stemsLacks: _normalizeStringArray(parsed.stemsLacks),
-        lyrics: lyrics === 0 || lyrics === 1 ? lyrics : null,
-        tunings: _normalizeStringArray(parsed.tunings),
-    };
-}
-
-function _loadLibFilters() {
-    try {
-        const raw = localStorage.getItem(_LIB_FILTERS_KEY);
-        if (!raw) return _defaultLibFilters();
-        const filters = _normalizeLibFilters(JSON.parse(raw));
-        // Normalize any stale 'Combo' tokens left from legacy-mode sessions.
-        if (_getArrangementNamingMode() === 'smart') {
-            filters.arrHas   = _toSmartArrs(filters.arrHas);
-            filters.arrLacks = _toSmartArrs(filters.arrLacks);
-        }
-        return filters;
-    } catch {
-        return _defaultLibFilters();
-    }
-}
-
-function _saveLibFilters() {
-    try { localStorage.setItem(_LIB_FILTERS_KEY, JSON.stringify(_libFilters)); }
-    catch { /* private mode / quota — ignore, in-memory state still works */ }
-}
-
-function _libActiveCount() {
-    let n = 0;
-    if (_libFilters.arrHas.length) n++;
-    if (_libFilters.arrLacks.length) n++;
-    if (_libFilters.stemsHas.length) n++;
-    if (_libFilters.stemsLacks.length) n++;
-    if (_libFilters.lyrics !== null) n++;
-    if (_libFilters.tunings.length) n++;
-    return n;
-}
-
-export function _applyLibFiltersToParams(params) {
-    const nm = _getArrangementNamingMode();
-    params.set('naming_mode', nm);
-    const arrHas   = nm === 'smart' ? _toSmartArrs(_libFilters.arrHas)   : _libFilters.arrHas;
-    const arrLacks = nm === 'smart' ? _toSmartArrs(_libFilters.arrLacks) : _libFilters.arrLacks;
-    if (arrHas.length)   params.set('arrangements_has',   arrHas.join(','));
-    if (arrLacks.length) params.set('arrangements_lacks', arrLacks.join(','));
-    if (_libFilters.stemsHas.length) params.set('stems_has', _libFilters.stemsHas.join(','));
-    if (_libFilters.stemsLacks.length) params.set('stems_lacks', _libFilters.stemsLacks.join(','));
-    if (_libFilters.lyrics !== null) params.set('has_lyrics', String(_libFilters.lyrics));
-    if (_libFilters.tunings.length) params.set('tunings', _libFilters.tunings.join(','));
-    return params;
-}
-
-function _pillState(item, hasList, lacksList) {
-    if (hasList.includes(item)) return 'require';
-    if (lacksList.includes(item)) return 'exclude';
-    return 'any';
-}
-
-function _cyclePill(item, hasKey, lacksKey) {
-    // Cycle: any -> require -> exclude -> any. Mutates _libFilters in place.
-    const hasList = _libFilters[hasKey];
-    const lacksList = _libFilters[lacksKey];
-    const inHas = hasList.indexOf(item);
-    const inLacks = lacksList.indexOf(item);
-    if (inHas === -1 && inLacks === -1) {
-        hasList.push(item);
-    } else if (inHas !== -1) {
-        hasList.splice(inHas, 1);
-        lacksList.push(item);
-    } else {
-        lacksList.splice(inLacks, 1);
-    }
-    _saveLibFilters();
-    _renderLibFilterDrawer();
-    _renderLibFilterChips();
-    L.libEpoch++;
-    L.currentPage = 0;
-    L.treeStats = null;  // letter bar counts depend on filters now
-    loadLibrary(0);
-}
-
-function _renderPillRow(containerId, items, hasKey, lacksKey, labelFor) {
-    const c = document.getElementById(containerId);
-    if (!c) return;
-    c.innerHTML = '';
-    for (const it of items) {
-        const id = typeof it === 'string' ? it : it.id;
-        const label = labelFor ? labelFor(it) : id;
-        const state = _pillState(id, _libFilters[hasKey], _libFilters[lacksKey]);
-        const btn = document.createElement('button');
-        btn.type = 'button';
-        btn.className = `filter-pill state-${state}`;
-        btn.textContent = label;
-        btn.onclick = () => _cyclePill(id, hasKey, lacksKey);
-        c.appendChild(btn);
-    }
-}
-
-function _renderLyricsPill() {
-    // Single tri-state pill matching the arrangement / stem pattern.
-    // Cycle: any (null) -> require (1) -> exclude (0) -> any.
-    const c = document.getElementById('filter-lyrics');
-    if (!c) return;
-    c.innerHTML = '';
-    const v = _libFilters.lyrics;
-    const state = v === 1 ? 'require' : v === 0 ? 'exclude' : 'any';
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = `filter-pill state-${state}`;
-    btn.textContent = 'Lyrics';
-    btn.onclick = () => {
-        _libFilters.lyrics = v === null ? 1 : v === 1 ? 0 : null;
-        _saveLibFilters();
-        _renderLyricsPill();
-        _renderLibFilterChips();
-        L.libEpoch++;
-        L.currentPage = 0;
-        L.treeStats = null;
-        loadLibrary(0);
-    };
-    c.appendChild(btn);
-}
-
-async function _renderTuningList() {
-    const c = document.getElementById('filter-tunings');
-    if (!c) return;
-    let fetchError = null;
-    if (!L.tuningNames) {
-        const myEpoch = L.libEpoch;
-        c.innerHTML = '<div class="text-xs text-gray-500 px-2">Loading...</div>';
-        try {
-            const params = _applyLibraryProviderToParams(new URLSearchParams());
-            const resp = await fetch(`/api/library/tuning-names?${params}`);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const data = await resp.json();
-            // Guard against a provider switch that invalidated _tuningNames
-            // while this request was in flight — discard a stale result.
-            if (myEpoch !== L.libEpoch) return;
-            L.tuningNames = Array.isArray(data.tunings) ? data.tunings : [];
-        } catch (e) {
-            if (myEpoch !== L.libEpoch) return;
-            // Distinguish a server / network failure from "the DB
-            // genuinely has no tunings indexed". The latter wants a
-            // Full Rescan; the former just wants a retry. Don't cache
-            // the failure — leave _tuningNames null so reopening the
-            // drawer triggers a fresh attempt.
-            L.tuningNames = null;
-            fetchError = e.message || 'request failed';
-        }
-    }
-    c.innerHTML = '';
-    if (fetchError) {
-        c.innerHTML = `<div class="text-xs text-red-400 px-2">Failed to load tunings (${esc(fetchError)}). Reopen the drawer to retry.</div>`;
-        return;
-    }
-    if (!L.tuningNames.length) {
-        c.innerHTML = '<div class="text-xs text-gray-500 px-2">No tunings indexed yet — try Full Rescan.</div>';
-        return;
-    }
-    for (const t of L.tuningNames) {
-        // Filter on the server grouping key (offsets for customs, name for named
-        // tunings); label custom pills with their target notes so two "Custom
-        // Tuning" entries are distinguishable. See tuning_names() in server.py.
-        const val = t.key || t.name;
-        let label = t.name;
-        if (t.name === 'Custom Tuning' && t.offsets
-            && typeof window.parseRawTuningOffsets === 'function'
-            && typeof window.displayTuningTargets === 'function') {
-            const offs = window.parseRawTuningOffsets(t.offsets);
-            const notes = offs ? window.displayTuningTargets(offs, { tuningName: t.name }) : '';
-            if (notes) label = 'Custom · ' + notes;
-        }
-        const checked = _libFilters.tunings.includes(val);
-        const row = document.createElement('label');
-        row.className = 'tuning-row';
-        row.innerHTML =
-            `<input type="checkbox" ${checked ? 'checked' : ''} class="rounded border-gray-600 bg-dark-700 text-accent">` +
-            `<span class="flex-1">${esc(label)}</span>` +
-            `<span class="tuning-count">${t.count}</span>`;
-        const cb = row.querySelector('input');
-        cb.onchange = () => {
-            const i = _libFilters.tunings.indexOf(val);
-            if (cb.checked && i === -1) _libFilters.tunings.push(val);
-            else if (!cb.checked && i !== -1) _libFilters.tunings.splice(i, 1);
-            _saveLibFilters();
-            _updateLibFiltersBadge();
-            _renderLibFilterChips();
-            _renderTuningSummary();
-            L.libEpoch++;
-            L.currentPage = 0;
-            L.treeStats = null;
-            loadLibrary(0);
-        };
-        c.appendChild(row);
-    }
-    _renderTuningSummary();
-}
-
-function _renderTuningSummary() {
-    const s = document.getElementById('filter-tunings-summary');
-    if (!s) return;
-    if (!_libFilters.tunings.length) { s.textContent = 'All tunings'; return; }
-    if (_libFilters.tunings.length === 1) { s.textContent = _libFilters.tunings[0]; return; }
-    s.textContent = `${_libFilters.tunings[0]} +${_libFilters.tunings.length - 1}`;
-}
-
-export function _updateLibFiltersBadge() {
-    const badge = document.getElementById('lib-filters-count');
-    if (!badge) return;
-    const n = _libActiveCount();
-    badge.textContent = String(n);
-    badge.classList.toggle('hidden', n === 0);
-}
-
-function _renderLibFilterDrawer() {
-    _renderPillRow('filter-arrangements', _getArrangements(), 'arrHas', 'arrLacks');
-    _renderPillRow('filter-stems', _STEM_DEFS, 'stemsHas', 'stemsLacks', s => s.label);
-    _renderLyricsPill();
-    _updateLibFiltersBadge();
-}
-
-export function _renderLibFilterChips() {
-    const row = document.getElementById('lib-filter-chips');
-    if (!row) return;
-    const chips = [];
-    for (const a of _libFilters.arrHas) chips.push({ label: a, kind: 'require', remove: () => _libFilters.arrHas = _libFilters.arrHas.filter(x => x !== a) });
-    for (const a of _libFilters.arrLacks) chips.push({ label: `no ${a}`, kind: 'exclude', remove: () => _libFilters.arrLacks = _libFilters.arrLacks.filter(x => x !== a) });
-    for (const s of _libFilters.stemsHas) {
-        const def = _STEM_DEFS.find(d => d.id === s);
-        chips.push({ label: def ? def.label : s, kind: 'require', remove: () => _libFilters.stemsHas = _libFilters.stemsHas.filter(x => x !== s) });
-    }
-    for (const s of _libFilters.stemsLacks) {
-        const def = _STEM_DEFS.find(d => d.id === s);
-        chips.push({ label: `no ${def ? def.label : s}`, kind: 'exclude', remove: () => _libFilters.stemsLacks = _libFilters.stemsLacks.filter(x => x !== s) });
-    }
-    if (_libFilters.lyrics === 1) chips.push({ label: 'has lyrics', kind: 'require', remove: () => _libFilters.lyrics = null });
-    if (_libFilters.lyrics === 0) chips.push({ label: 'no lyrics', kind: 'exclude', remove: () => _libFilters.lyrics = null });
-    for (const t of _libFilters.tunings) chips.push({ label: t, kind: 'require', remove: () => _libFilters.tunings = _libFilters.tunings.filter(x => x !== t) });
-
-    row.innerHTML = '';
-    if (!chips.length) {
-        row.classList.add('hidden');
-        return;
-    }
-    row.classList.remove('hidden');
-    for (const c of chips) {
-        const el = document.createElement('span');
-        el.className = `chip ${c.kind === 'exclude' ? 'chip-exclude' : ''}`;
-        // The "×" glyph isn't a reliable accessible name; assistive tech
-        // also can't depend on `title` alone. Spell out the action plus
-        // the chip's label in `aria-label` so screen-reader users hear
-        // "Remove filter: Lead" instead of "button" or just "×".
-        const ariaLabel = `Remove filter: ${c.label}`;
-        el.innerHTML =
-            `${esc(c.label)}<button type="button" title="${esc(ariaLabel)}" aria-label="${esc(ariaLabel)}">×</button>`;
-        el.querySelector('button').onclick = () => {
-            c.remove();
-            _saveLibFilters();
-            _renderLibFilterDrawer();
-            _renderLibFilterChips();
-            L.libEpoch++;
-            L.currentPage = 0;
-            L.treeStats = null;
-            loadLibrary(0);
-        };
-        row.appendChild(el);
-    }
-}
-
-export function toggleLibFilters(force) {
-    const drawer = document.getElementById('lib-filter-drawer');
-    const overlay = document.getElementById('lib-filter-overlay');
-    if (!drawer) return;
-    const open = force === undefined ? !drawer.classList.contains('open') : !!force;
-    drawer.classList.toggle('open', open);
-    overlay.classList.toggle('hidden', !open);
-    if (open) {
-        _renderLibFilterDrawer();
-        _renderTuningList();
-    }
-}
-
-export function clearLibFilters() {
-    _libFilters = _defaultLibFilters();
-    _saveLibFilters();
-    _renderLibFilterDrawer();
-    _renderTuningList();
-    _renderLibFilterChips();
-    L.libEpoch++;
-    L.currentPage = 0;
-    L.treeStats = null;
-    loadLibrary(0);
-}
-
-export function setLibView(view) {
-    libView = view;
-    if (_LIB_VIEW_VALUES.has(view)) _writePersistedChoice(_LIB_VIEW_KEY, view);
-    document.getElementById('lib-grid').classList.toggle('hidden', view !== 'grid');
-    document.getElementById('lib-tree').classList.toggle('hidden', view !== 'tree');
-    document.querySelectorAll('.lib-grid-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'grid'));
-    document.querySelectorAll('.lib-tree-ctrl').forEach(el => el.classList.toggle('hidden', view !== 'tree'));
-    document.querySelectorAll('.lib-nontree-ctrl').forEach(el => el.classList.toggle('hidden', view === 'tree'));
-    document.getElementById('view-grid-btn').className = `px-3 py-2.5 text-sm transition ${view === 'grid' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    document.getElementById('view-tree-btn').className = `px-3 py-2.5 text-sm transition ${view === 'tree' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    // Folder view
-    const folderTreeEl = document.getElementById('lib-folder-tree');
-    if (folderTreeEl) folderTreeEl.classList.toggle('hidden', view !== 'folder');
-    const folderCtrlEl = document.getElementById('lib-folder-controls');
-    if (folderCtrlEl) folderCtrlEl.classList.toggle('hidden', view !== 'folder');
-    // The folder-view toolbar button only exists in the classic (v2) markup;
-    // setLibView also runs at v3 startup where it's absent, so guard it (the
-    // grid/tree buttons above predate this and exist on both paths).
-    const folderBtnEl = document.getElementById('view-folder-btn');
-    if (folderBtnEl) folderBtnEl.className = `px-3 py-2.5 text-sm transition ${view === 'folder' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
-    if (libView === 'folder' && view !== 'folder') window.folderLibrary?.unload?.();
-    if (view !== 'grid') stopInfiniteScroll();
-    L.libEpoch++;
-    // View toggle changes which container `_libNavItems` resolves
-    // to (tree vs grid) — drop the cache so the next keypress
-    // re-derives.
-    _bumpLibNavGeneration();
-    loadLibrary();
-}
-
-export async function loadLibrary(page) {
-    if (libView === 'grid') {
-        await loadGridPage(page !== undefined ? page : L.currentPage);
-    } else if (libView === 'tree') {
-        await loadTreeView();
-    } else if (libView === 'folder') {
-        if (window.folderLibrary) await window.folderLibrary.load();
-    }
-    // v3 Songs page manages its own view state independently of libView — if
-    // lib-folder-tree is visible, the folder library must also react to filter changes.
-    if (libView !== 'folder' && window.folderLibrary) {
+export async function loadLibrary() {
+    // The legacy #home grid/tree this used to drive is gone — the v3 Songs
+    // screen (static/v3/songs.js) fetches its own data. The one shared surface
+    // left is the plugin-provided folder view, which renders into
+    // #lib-folder-tree inside the v3 Songs screen: refresh it when visible so
+    // rescans, favorite toggles, and metadata edits still propagate.
+    if (window.folderLibrary) {
         const treeEl = document.getElementById('lib-folder-tree');
         if (treeEl && !treeEl.classList.contains('hidden')) {
             await window.folderLibrary.load();
@@ -1090,122 +585,6 @@ function _setLibraryOfflineMessage(containerId, countId, message) {
     }
 }
 
-function _setLibraryLoadingMessage(containerId, countId, message) {
-    const container = document.getElementById(containerId);
-    const count = document.getElementById(countId);
-    if (count) count.textContent = 'Loading source...';
-    if (container) {
-        container.innerHTML = `<div class="rounded-xl border border-gray-800/50 bg-dark-700/30 px-4 py-6 text-sm text-gray-300">${esc(message || 'Loading library...')}</div>`;
-    }
-}
-
-function _libraryLoadingText() {
-    const provider = _activeLibraryProvider();
-    if (!provider || provider.id === 'local' || provider.kind === 'local') {
-        return 'Loading library...';
-    }
-    return `Connecting to ${provider.label || provider.id}...`;
-}
-
-export function filterLibrary() {
-    clearTimeout(_debounceTimer);
-    _debounceTimer = setTimeout(() => {
-        L.libEpoch++;
-        L.currentPage = 0;
-        _treeLetter = '';
-        // Letter-bar counts depend on `q` and the active filter set —
-        // any change to those must invalidate the tree-view stats
-        // cache or the next switch to tree view will render stale
-        // letter counts (feedBack#134 review).
-        L.treeStats = null;
-        loadLibrary(0);
-    }, 250);
-}
-
-export function sortLibrary() {
-    // Persist whichever of the two dropdowns just changed so the next
-    // page load can restore both. Both selects route through this
-    // handler today; reading both is cheap and keeps the function
-    // single-purpose.
-    const sortEl = document.getElementById('lib-sort');
-    if (sortEl && _LIB_SORT_VALUES.has(sortEl.value)) {
-        _writePersistedChoice(_LIB_SORT_KEY, sortEl.value);
-    }
-    const fmtEl = document.getElementById('lib-format');
-    if (fmtEl && _LIB_FORMAT_VALUES.has(fmtEl.value)) {
-        _writePersistedChoice(_LIB_FORMAT_KEY, fmtEl.value);
-    }
-    L.libEpoch++;
-    L.currentPage = 0;
-    // Same reason as filterLibrary: format dropdown changes the stats
-    // payload, so the cache must drop too.
-    L.treeStats = null;
-    loadLibrary(0);
-}
-
-async function loadGridPage(page = 0) {
-    const myEpoch = L.libEpoch;
-    const q = document.getElementById('lib-filter').value.trim();
-    const sort = document.getElementById('lib-sort').value;
-    const format = (document.getElementById('lib-format') || {}).value || '';
-    const params = new URLSearchParams({ q, page, size: PAGE_SIZE, sort });
-    if (format) params.set('format', format);
-    _applyLibraryProviderToParams(params);
-    _applyLibFiltersToParams(params);
-    if (page === 0) {
-        _setLibraryLoadingMessage('lib-grid', 'lib-count', _libraryLoadingText());
-    }
-    let data;
-    try {
-        data = await _fetchJsonOrThrow(`/api/library?${params}`);
-    } catch (error) {
-        if (myEpoch !== L.libEpoch) return;
-        L.currentPage = 0;
-        _hasMore = false;
-        stopInfiniteScroll();
-        _setLibraryOfflineMessage('lib-grid', 'lib-count', error.message || 'This source appears to be offline.');
-        return;
-    }
-    if (myEpoch !== L.libEpoch) return; // filter/sort/view changed mid-fetch
-
-    L.currentPage = page;
-    const total = data.total || 0;
-    const songs = data.songs || [];
-    document.getElementById('lib-count').textContent = `${total} songs`;
-
-    renderGridCards(songs, 'lib-grid', page === 0 ? 'replace' : 'append');
-
-    _hasMore = (page + 1) * PAGE_SIZE < total;
-    setupInfiniteScroll();
-}
-
-function setupInfiniteScroll() {
-    let sentinel = document.getElementById('lib-grid-sentinel');
-    if (!sentinel) {
-        sentinel = document.createElement('div');
-        sentinel.id = 'lib-grid-sentinel';
-        sentinel.style.height = '1px';
-        document.getElementById('lib-grid').after(sentinel);
-    }
-    stopInfiniteScroll();
-    if (!_hasMore) return;
-    _gridObserver = new IntersectionObserver(async (entries) => {
-        if (entries[0].isIntersecting && !_loadingMore && _hasMore) {
-            _loadingMore = true;
-            try { await loadGridPage(L.currentPage + 1); }
-            finally { _loadingMore = false; }
-        }
-    }, { rootMargin: '400px' });
-    _gridObserver.observe(sentinel);
-}
-
-export function stopInfiniteScroll() {
-    if (_gridObserver) {
-        _gridObserver.disconnect();
-        _gridObserver = null;
-    }
-}
-
 function formatBadge(fmt, stemCount) {
     if (fmt === 'sloppak' && (stemCount || 0) > 1) {
         return `<span class="fmt-badge absolute top-2 right-2 px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-900/80 text-purple-200 border border-purple-700">STEMS</span>`;
@@ -1232,7 +611,7 @@ function formatBadgeInline(fmt, stemCount) {
     return '';
 }
 
-export function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace') {
+export function renderGridCards(songs, containerId = 'fav-grid', mode = 'replace') {
     const grid = document.getElementById(containerId);
     const screenProviderId = containerId.startsWith('fav') ? 'local' : _activeLibraryProviderId();
     const html = songs.map(song => {
@@ -1325,57 +704,32 @@ export function renderGridCards(songs, containerId = 'lib-grid', mode = 'replace
     // When a search input is focused the user is actively filtering —
     // re-apply the highlight but don't move the viewport (they didn't
     // leave the page and their scroll position should be preserved).
-    if (mode !== 'append') {
-        const screen = containerId.startsWith('fav') ? 'favorites' : 'home';
+    if (mode !== 'append' && containerId.startsWith('fav')) {
         // Scroll only on the first render after a screen entry —
-        // routine search / sort / filter renders re-apply the
-        // highlight without moving the viewport. The flag is
-        // one-shot and consumed here.
-        const scroll = _libScrollOnNextRender[screen];
-        if (scroll) _libScrollOnNextRender[screen] = false;
-        _restoreLibSelection(grid, screen, { scroll });
+        // routine search / sort renders re-apply the highlight
+        // without moving the viewport. The flag is one-shot and
+        // consumed here.
+        const scroll = _libScrollOnNextRender.favorites;
+        if (scroll) _libScrollOnNextRender.favorites = false;
+        _restoreLibSelection(grid, { scroll });
     }
 }
-
-export async function loadTreeView() {
-    const myEpoch = L.libEpoch;
-    if (!L.treeStats) {
-        _setLibraryLoadingMessage('lib-tree', 'lib-count', _libraryLoadingText());
-        const q = document.getElementById('lib-filter').value.trim();
-        const format = (document.getElementById('lib-format') || {}).value || '';
-        const sp = new URLSearchParams();
-        if (q) sp.set('q', q);
-        if (format) sp.set('format', format);
-        _applyLibraryProviderToParams(sp);
-        _applyLibFiltersToParams(sp);
-        const qs = sp.toString();
-        try {
-            L.treeStats = await _fetchJsonOrThrow(`/api/library/stats${qs ? '?' + qs : ''}`);
-        } catch (error) {
-            if (myEpoch !== L.libEpoch) return;
-            L.treeStats = null;
-            _setLibraryOfflineMessage('lib-tree', 'lib-count', error.message || 'This source appears to be offline.');
-            return;
-        }
-        if (myEpoch !== L.libEpoch) return;
-    }
-    const q = document.getElementById('lib-filter').value.trim();
-    await renderTreeInto('lib-tree', 'lib-count', L.treeStats, _treeLetter, q, false, undefined, myEpoch);
-}
-
-let _treePage = 0;
 
 const TREE_PAGE_SIZE = 50;
 
-export async function renderTreeInto(containerId, countId, stats, letter, q, favoritesOnly, page, expectedEpoch = L.libEpoch) {
-    if (page === undefined) page = favoritesOnly ? _favTreePage || 0 : _treePage;
+// Renders the favorites artist/album tree (the only tree left — the legacy
+// library tree went with the #home screen).
+export async function renderTreeInto(containerId, countId, stats, letter, q, page, expectedEpoch = L.libEpoch) {
+    if (page === undefined) page = _favTreePage || 0;
     const container = document.getElementById(containerId);
-    const screenProviderId = favoritesOnly ? 'local' : _activeLibraryProviderId();
+    const screenProviderId = 'local';
     const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ#'.split('');
     const chevron = `<svg class="chevron w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>`;
 
-    const letterFn = favoritesOnly ? 'filterFavTreeLetter' : 'filterTreeLetter';
-    const pageFn = favoritesOnly ? 'goFavTreePage' : 'goTreePage';
+    // These handler NAMES are composed into onclick="" strings at runtime, so
+    // they must stay published on window (see app.js's contract block).
+    const letterFn = 'filterFavTreeLetter';
+    const pageFn = 'goFavTreePage';
     let html = '<div class="flex flex-wrap gap-1 mb-6">';
     html += `<button onclick="${letterFn}('')" class="px-2 py-1 rounded text-xs transition ${
         !letter ? 'bg-accent text-white' : 'bg-dark-700 text-gray-400 hover:text-white'
@@ -1395,11 +749,7 @@ export async function renderTreeInto(containerId, countId, stats, letter, q, fav
     const params = new URLSearchParams();
     if (letter) params.set('letter', letter);
     if (q) params.set('q', q);
-    if (favoritesOnly) params.set('favorites', '1');
-    else _applyLibraryProviderToParams(params);
-    const format = (document.getElementById('lib-format') || {}).value || '';
-    if (format) params.set('format', format);
-    if (!favoritesOnly) _applyLibFiltersToParams(params);
+    params.set('favorites', '1');
     params.set('page', page);
     params.set('size', TREE_PAGE_SIZE);
     let data;
@@ -1423,13 +773,9 @@ export async function renderTreeInto(containerId, countId, stats, letter, q, fav
 
     // A previous Expand/Collapse-All click is persisted as '1'/'0' and
     // overrides the auto-open heuristic for both artists and albums.
-    // Library and Favorites have independent buttons and independent
-    // keys (feedBack.libTreeExpand vs feedBack.favTreeExpand) — fed
-    // off the favoritesOnly flag — so toggling one doesn't flip the
-    // other's state. Falsy / unset key → fall back to the existing
-    // heuristic (open when there's an active search or few rows).
-    const expandKey = favoritesOnly ? _FAV_TREE_EXPAND_KEY : _LIB_TREE_EXPAND_KEY;
-    const savedExpand = _readPersistedChoice(expandKey, _LIB_TREE_EXPAND_VALUES, null);
+    // Falsy / unset key → fall back to the existing heuristic (open
+    // when there's an active search or few rows).
+    const savedExpand = _readPersistedChoice(_FAV_TREE_EXPAND_KEY, _LIB_TREE_EXPAND_VALUES, null);
     const forceArtistOpen = savedExpand === '1';
     const forceArtistClosed = savedExpand === '0';
 
@@ -1543,23 +889,9 @@ export async function renderTreeInto(containerId, countId, stats, letter, q, fav
     // actually visible — see _restoreLibSelection. Scroll only on
     // the first render after a screen entry (one-shot flag set in
     // showScreen) so routine renders don't yank the viewport.
-    const screen = favoritesOnly ? 'favorites' : 'home';
-    const scroll = _libScrollOnNextRender[screen];
-    if (scroll) _libScrollOnNextRender[screen] = false;
-    _restoreLibSelection(container, screen, { scroll });
-}
-
-export function goTreePage(p) {
-    _treePage = Math.max(0, p);
-    loadTreeView();
-    document.getElementById('library-section').scrollIntoView({ behavior: 'smooth' });
-}
-
-export function filterTreeLetter(letter) {
-    _treeLetter = (_treeLetter === letter) ? '' : letter;
-    _treePage = 0;
-    _writePersistedLetter(_LIB_TREE_LETTER_KEY, _treeLetter);
-    loadTreeView();
+    const scroll = _libScrollOnNextRender.favorites;
+    if (scroll) _libScrollOnNextRender.favorites = false;
+    _restoreLibSelection(container, { scroll });
 }
 
 function _toggleAllInTree(containerId, expand, persistKey) {
@@ -1581,10 +913,6 @@ function _toggleAllInTree(containerId, expand, persistKey) {
     // falling back to the auto-open heuristic. Stored as '1'/'0' so a
     // missing key reliably means "no explicit choice".
     _writePersistedChoice(persistKey, expand ? '1' : '0');
-}
-
-export function toggleAllArtists(expand) {
-    _toggleAllInTree('lib-tree', expand, _LIB_TREE_EXPAND_KEY);
 }
 
 export function toggleAllFavoriteArtists(expand) {
@@ -1659,8 +987,9 @@ export function setFavView(view) {
     document.getElementById('fav-view-tree-btn').className = `px-3 py-2.5 text-sm transition ${view === 'tree' ? 'text-accent-light' : 'text-gray-600 hover:text-gray-400'}`;
     const pag = document.getElementById('fav-pagination');
     if (pag && view !== 'grid') pag.innerHTML = '';
-    // Same reason as setLibView: dropping the items cache so the
-    // next keypress re-derives against the now-active container.
+    // Grid vs tree changes which container `_libNavItems` resolves
+    // to — drop the items cache so the next keypress re-derives
+    // against the now-active container.
     _bumpLibNavGeneration();
     loadFavorites();
 }
@@ -1722,8 +1051,7 @@ async function loadFavTreeView() {
     }
     const q = document.getElementById('fav-filter').value.trim();
     const letter = _favTreeLetter;
-    // Reuse the tree renderer with fav-tree container and fav-count
-    await renderTreeInto('fav-tree', 'fav-count', L.favTreeStats, letter, q, true);
+    await renderTreeInto('fav-tree', 'fav-count', L.favTreeStats, letter, q);
 }
 
 export function filterFavTreeLetter(letter) {
@@ -1869,11 +1197,11 @@ export function _removeLibCardsForFilename(filename) {
         removed++;
     }
     if (removed === 0) return;
-    // Decrement the visible count badges that loadGridPage / loadTreeView
-    // populated. Counts come from the server's `total` so this is a
+    // Decrement the visible count badge the favorites views populated.
+    // Counts come from the server's `total` so this is a
     // best-effort estimate until the next refetch, but it keeps the
     // displayed number consistent with what's on screen right now.
-    for (const id of ['lib-count', 'fav-count']) {
+    for (const id of ['fav-count']) {
         const el = document.getElementById(id);
         if (!el) continue;
         const m = (el.textContent || '').match(/^(\d+)/);

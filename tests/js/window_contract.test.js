@@ -67,18 +67,17 @@ test('every on*= handler app.js builds in a template literal is on window', () =
 });
 
 test('the runtime-composed handler names are on window', () => {
-    // app.js:2156-2157 chooses the handler NAME at runtime:
-    //     const letterFn = favoritesOnly ? 'filterFavTreeLetter' : 'filterTreeLetter';
-    //     const pageFn   = favoritesOnly ? 'goFavTreePage'       : 'goTreePage';
-    // then interpolates it: `onclick="${letterFn}('A')"`.
+    // static/js/library.js's renderTreeInto composes the handler NAME into
+    // onclick="" strings at runtime:
+    //     `onclick="filterFavTreeLetter('A')"` / `onclick="goFavTreePage(2)"`
     //
     // ponytail: hardcoded on purpose. These names exist only inside string
     // literals, so the two scans above cannot see them, and neither can ESLint,
-    // no-undef, or a grep for `onclick="fn`. They are the library A–Z rail and
-    // its pagination — drop one and those buttons throw on click and nowhere
-    // else. If that ternary ever gains a branch, add the new name here too.
+    // no-undef, or a grep for `onclick="fn`. They are the favorites A–Z rail
+    // and its pagination — drop one and those buttons throw on click and
+    // nowhere else. If renderTreeInto ever composes a new name, add it here.
     const exposed = exposedNames();
-    for (const name of ['filterTreeLetter', 'filterFavTreeLetter', 'goTreePage', 'goFavTreePage']) {
+    for (const name of ['filterFavTreeLetter', 'goFavTreePage']) {
         assert.ok(exposed.has(name), `window.${name} is required by the runtime-composed A–Z rail / pagination handlers`);
     }
 });
