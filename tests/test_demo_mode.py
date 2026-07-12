@@ -18,6 +18,7 @@ import sys
 import threading
 
 import demo_mode
+from routers import diagnostics as diagnostics_router
 import pytest
 from fastapi.testclient import TestClient
 
@@ -348,7 +349,7 @@ def test_diag_normalize_include_string_false_treated_as_disabled(tmp_path, monke
     """String 'false' must be treated as disabled, not truthy."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        result = server._diag_normalize_include({"logs": "false", "system": "true"})
+        result = diagnostics_router._diag_normalize_include({"logs": "false", "system": "true"})
         assert result["logs"] is False
         assert result["system"] is True
     finally:
@@ -359,7 +360,7 @@ def test_diag_normalize_include_string_zero_treated_as_disabled(tmp_path, monkey
     """String '0' must be treated as disabled."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        result = server._diag_normalize_include({"console": "0", "hardware": "1"})
+        result = diagnostics_router._diag_normalize_include({"console": "0", "hardware": "1"})
         assert result["console"] is False
         assert result["hardware"] is True
     finally:
@@ -370,7 +371,7 @@ def test_diag_normalize_include_missing_keys_default_true(tmp_path, monkeypatch)
     """Missing keys must default to True so a bare {} request exports everything."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        result = server._diag_normalize_include({})
+        result = diagnostics_router._diag_normalize_include({})
         for key in ("system", "hardware", "logs", "console", "plugins"):
             assert result[key] is True
     finally:
@@ -381,7 +382,7 @@ def test_diag_normalize_include_none_returns_all_true(tmp_path, monkeypatch):
     """None input must default to all-True."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        result = server._diag_normalize_include(None)
+        result = diagnostics_router._diag_normalize_include(None)
         for key in ("system", "hardware", "logs", "console", "plugins"):
             assert result[key] is True
     finally:
@@ -393,11 +394,11 @@ def test_diag_coerce_bool_string_false(tmp_path, monkeypatch):
     endpoint handles { "redact": "false" } correctly."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        assert server._diag_coerce_bool("false") is False
-        assert server._diag_coerce_bool("False") is False
-        assert server._diag_coerce_bool("0") is False
-        assert server._diag_coerce_bool("no") is False
-        assert server._diag_coerce_bool("") is False
+        assert diagnostics_router._diag_coerce_bool("false") is False
+        assert diagnostics_router._diag_coerce_bool("False") is False
+        assert diagnostics_router._diag_coerce_bool("0") is False
+        assert diagnostics_router._diag_coerce_bool("no") is False
+        assert diagnostics_router._diag_coerce_bool("") is False
     finally:
         _cleanup(server, client)
 
@@ -407,11 +408,11 @@ def test_diag_coerce_bool_truthy_values(tmp_path, monkeypatch):
     as True."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        assert server._diag_coerce_bool(True) is True
-        assert server._diag_coerce_bool("true") is True
-        assert server._diag_coerce_bool("1") is True
-        assert server._diag_coerce_bool("yes") is True
-        assert server._diag_coerce_bool(1) is True
+        assert diagnostics_router._diag_coerce_bool(True) is True
+        assert diagnostics_router._diag_coerce_bool("true") is True
+        assert diagnostics_router._diag_coerce_bool("1") is True
+        assert diagnostics_router._diag_coerce_bool("yes") is True
+        assert diagnostics_router._diag_coerce_bool(1) is True
     finally:
         _cleanup(server, client)
 
@@ -420,8 +421,8 @@ def test_diag_coerce_bool_none_uses_default(tmp_path, monkeypatch):
     """_diag_coerce_bool(None) must return the supplied default."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        assert server._diag_coerce_bool(None, default=True) is True
-        assert server._diag_coerce_bool(None, default=False) is False
+        assert diagnostics_router._diag_coerce_bool(None, default=True) is True
+        assert diagnostics_router._diag_coerce_bool(None, default=False) is False
     finally:
         _cleanup(server, client)
 
@@ -430,9 +431,9 @@ def test_diag_cap_console_truncates_to_limit(tmp_path, monkeypatch):
     """_diag_cap_console must return a list truncated to _DIAG_MAX_CONSOLE_ENTRIES."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        limit = server._DIAG_MAX_CONSOLE_ENTRIES
+        limit = diagnostics_router._DIAG_MAX_CONSOLE_ENTRIES
         big_list = [{"msg": f"entry {i}"} for i in range(limit + 100)]
-        result = server._diag_cap_console(big_list)
+        result = diagnostics_router._diag_cap_console(big_list)
         assert isinstance(result, list)
         assert len(result) == limit
         assert result[0] == {"msg": "entry 0"}
@@ -445,7 +446,7 @@ def test_diag_cap_console_accepts_list_within_limit(tmp_path, monkeypatch):
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
         short = [{"msg": "hi"}] * 5
-        assert server._diag_cap_console(short) == short
+        assert diagnostics_router._diag_cap_console(short) == short
     finally:
         _cleanup(server, client)
 
@@ -454,9 +455,9 @@ def test_diag_cap_console_rejects_non_list(tmp_path, monkeypatch):
     """_diag_cap_console must return None for non-list inputs."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        assert server._diag_cap_console("not a list") is None
-        assert server._diag_cap_console({"a": 1}) is None
-        assert server._diag_cap_console(None) is None
+        assert diagnostics_router._diag_cap_console("not a list") is None
+        assert diagnostics_router._diag_cap_console({"a": 1}) is None
+        assert diagnostics_router._diag_cap_console(None) is None
     finally:
         _cleanup(server, client)
 
@@ -465,10 +466,10 @@ def test_diag_cap_dict_rejects_oversized_payload(tmp_path, monkeypatch):
     """_diag_cap_dict must return None when the serialised dict exceeds the byte cap."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        limit = server._DIAG_MAX_CLIENT_PAYLOAD_BYTES
+        limit = diagnostics_router._DIAG_MAX_CLIENT_PAYLOAD_BYTES
         # Build a dict whose JSON representation exceeds the cap.
         big_dict = {"k": "x" * (limit + 1)}
-        assert server._diag_cap_dict(big_dict) is None
+        assert diagnostics_router._diag_cap_dict(big_dict) is None
     finally:
         _cleanup(server, client)
 
@@ -478,7 +479,7 @@ def test_diag_cap_dict_accepts_dict_within_limit(tmp_path, monkeypatch):
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
         small = {"renderer": "Intel Iris Xe", "vram_mb": 4096}
-        assert server._diag_cap_dict(small) == small
+        assert diagnostics_router._diag_cap_dict(small) == small
     finally:
         _cleanup(server, client)
 
@@ -487,9 +488,9 @@ def test_diag_cap_dict_rejects_non_dict(tmp_path, monkeypatch):
     """_diag_cap_dict must return None for non-dict inputs."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        assert server._diag_cap_dict([1, 2, 3]) is None
-        assert server._diag_cap_dict("string") is None
-        assert server._diag_cap_dict(None) is None
+        assert diagnostics_router._diag_cap_dict([1, 2, 3]) is None
+        assert diagnostics_router._diag_cap_dict("string") is None
+        assert diagnostics_router._diag_cap_dict(None) is None
     finally:
         _cleanup(server, client)
 
@@ -498,10 +499,10 @@ def test_diag_cap_contributions_drops_oversized_plugin(tmp_path, monkeypatch):
     """_diag_cap_contributions must drop only the oversized plugin, not others."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        limit = server._DIAG_MAX_CLIENT_PAYLOAD_BYTES
+        limit = diagnostics_router._DIAG_MAX_CLIENT_PAYLOAD_BYTES
         big_payload = {"data": "x" * (limit + 1)}
         small_payload = {"active_preset": "rock"}
-        result = server._diag_cap_contributions({
+        result = diagnostics_router._diag_cap_contributions({
             "big_plugin": big_payload,
             "small_plugin": small_payload,
         })
@@ -516,9 +517,9 @@ def test_diag_cap_contributions_returns_none_for_non_dict(tmp_path, monkeypatch)
     """_diag_cap_contributions must return None for non-dict inputs."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        assert server._diag_cap_contributions(None) is None
-        assert server._diag_cap_contributions([{"a": 1}]) is None
-        assert server._diag_cap_contributions("string") is None
+        assert diagnostics_router._diag_cap_contributions(None) is None
+        assert diagnostics_router._diag_cap_contributions([{"a": 1}]) is None
+        assert diagnostics_router._diag_cap_contributions("string") is None
     finally:
         _cleanup(server, client)
 
@@ -527,8 +528,8 @@ def test_diag_cap_contributions_returns_none_when_all_dropped(tmp_path, monkeypa
     """_diag_cap_contributions must return None when every plugin is dropped."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        limit = server._DIAG_MAX_CLIENT_PAYLOAD_BYTES
-        result = server._diag_cap_contributions({
+        limit = diagnostics_router._DIAG_MAX_CLIENT_PAYLOAD_BYTES
+        result = diagnostics_router._diag_cap_contributions({
             "p1": {"data": "x" * (limit + 1)},
             "p2": {"data": "y" * (limit + 1)},
         })
@@ -542,7 +543,7 @@ def test_diag_cap_contributions_passes_small_plugins_through(tmp_path, monkeypat
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
         contribs = {"p1": {"x": 1}, "p2": {"y": 2}}
-        result = server._diag_cap_contributions(contribs)
+        result = diagnostics_router._diag_cap_contributions(contribs)
         assert result == contribs
     finally:
         _cleanup(server, client)
@@ -552,7 +553,7 @@ def test_diag_cap_contributions_filters_unknown_plugin_ids(tmp_path, monkeypatch
     """_diag_cap_contributions must skip plugins not in known_ids before serialising."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        result = server._diag_cap_contributions(
+        result = diagnostics_router._diag_cap_contributions(
             {"known_plugin": {"data": "ok"}, "unknown_plugin": {"data": "secret"}},
             known_ids={"known_plugin"},
         )
@@ -568,7 +569,7 @@ def test_diag_cap_contributions_known_ids_none_accepts_all(tmp_path, monkeypatch
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
         contribs = {"any_plugin": {"x": 1}, "another_plugin": {"y": 2}}
-        result = server._diag_cap_contributions(contribs, known_ids=None)
+        result = diagnostics_router._diag_cap_contributions(contribs, known_ids=None)
         assert result == contribs
     finally:
         _cleanup(server, client)
@@ -580,8 +581,8 @@ def test_diag_cap_contributions_aggregate_cap_enforced(tmp_path, monkeypatch):
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
         # Each per-plugin payload is just under the per-plugin cap.
-        per_limit = server._DIAG_MAX_CLIENT_PAYLOAD_BYTES
-        agg_limit = server._DIAG_MAX_CONTRIBUTIONS_BYTES
+        per_limit = diagnostics_router._DIAG_MAX_CLIENT_PAYLOAD_BYTES
+        agg_limit = diagnostics_router._DIAG_MAX_CONTRIBUTIONS_BYTES
         # payload that is slightly under per_limit but together fills agg_limit.
         # The contribution {"data": big} serialises to payload_size + 11 bytes
         # (the JSON envelope `{"data":"..."}` adds 11 bytes), so we need
@@ -591,7 +592,7 @@ def test_diag_cap_contributions_aggregate_cap_enforced(tmp_path, monkeypatch):
         # How many plugins would exceed the aggregate limit?
         n_plugins = (agg_limit // payload_size) + 5
         contribs = {f"p{i}": {"data": big} for i in range(n_plugins)}
-        result = server._diag_cap_contributions(contribs)
+        result = diagnostics_router._diag_cap_contributions(contribs)
         # Result must be non-None (some plugins fit) but fewer than n_plugins.
         assert result is not None
         assert len(result) < n_plugins, (
@@ -606,12 +607,12 @@ def test_diag_cap_console_enforces_byte_cap(tmp_path, monkeypatch):
     reached, even when the entry count is still below _DIAG_MAX_CONSOLE_ENTRIES."""
     server, client = _make_client(tmp_path, monkeypatch, demo=False)
     try:
-        byte_limit = server._DIAG_MAX_CONSOLE_BYTES
+        byte_limit = diagnostics_router._DIAG_MAX_CONSOLE_BYTES
         # Each entry is 1 KB; create enough to exceed the byte cap long before
         # the count cap kicks in.
         entry = {"level": "log", "msg": "x" * 1024}
         n = (byte_limit // 1024) + 100
-        result = server._diag_cap_console([entry] * n)
+        result = diagnostics_router._diag_cap_console([entry] * n)
         assert isinstance(result, list)
         assert len(result) < n, "Byte cap must truncate entries before count cap"
     finally:

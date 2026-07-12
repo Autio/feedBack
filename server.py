@@ -1524,14 +1524,6 @@ appstate.configure(running_version=_running_version)
 
 
 # ── Diagnostic bundle export (feedBack#166) → routers/diagnostics.py (R3) ────
-# The pure caps/normalisers are re-exported so existing server._diag_* /
-# server._DIAG_* tests keep resolving (none of them monkeypatch these).
-from routers.diagnostics import (  # noqa: E402  (re-export for test compatibility)
-    _diag_cap_console, _diag_cap_contributions, _diag_cap_dict,
-    _diag_coerce_bool, _diag_normalize_include,
-    _DIAG_MAX_CLIENT_PAYLOAD_BYTES, _DIAG_MAX_CONSOLE_BYTES,
-    _DIAG_MAX_CONSOLE_ENTRIES, _DIAG_MAX_CONTRIBUTIONS_BYTES,
-)
 app.include_router(diagnostics.router)
 
 
