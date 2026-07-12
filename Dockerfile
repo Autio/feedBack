@@ -214,6 +214,12 @@ COPY VERSION /app/
 # Only the .sloppak artifacts are needed at runtime — not the builder script.
 COPY docs/diagnostics/*.sloppak /app/docs/diagnostics/
 
+# Starter songs seeded once into DLC_DIR/starter/ on first run
+# (seed_builtin_starter_content in lib/builtin_content.py). Without this the
+# seeding silently no-ops in the container and fresh installs get an empty
+# library.
+COPY content/ /app/content/
+
 ENV PYTHONPATH=/app/lib:/app
 
 EXPOSE 8000
