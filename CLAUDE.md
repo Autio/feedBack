@@ -16,7 +16,7 @@ lib/                    All backend modules (flat imports: `from song import Son
   song.py               Data models (Note, Chord, Arrangement, Song) + wire format
   sloppak.py            .sloppak/.feedpak format (zip or directory)
   loosefolder.py        Loose-folder XML chart support
-  metadata_db.py        SQLite persistence (library cache, stats, progression, shop)
+  metadata_db/          SQLite persistence, split by domain (library cache, stats, shop, ...)
   gp2rs.py, gp2rs_gpx.py  Guitar Pro -> arrangement XML (GP3-5 / GP6-8)
   routers/              FastAPI routers (library, song, ws_highway, settings, ...)
   appstate.py           Dependency seam: server.py publishes, routers read
