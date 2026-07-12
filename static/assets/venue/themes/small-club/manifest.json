@@ -3,34 +3,28 @@
   "name": "Small Club",
   "label": "Small Club",
   "type": "generated-original",
-  "version": 10,
+  "version": 11,
   "assets": {
     "bgPlate": "bg-plate.webp",
-    "fallbackBgPlate": "bg-plate.png",
     "backdrop": "venue-backdrop.svg",
     "crowd": "crowd-silhouette.svg",
     "lights": "stage-lights.svg"
   },
   "instrumentPlates": {
     "guitar": {
-      "webp": "guitar-pov-bg.webp",
-      "png": "guitar-pov-bg.png"
+      "webp": "guitar-pov-bg.webp"
     },
     "bass": {
-      "webp": "bass-pov-bg.webp",
-      "png": "bass-pov-bg.png"
+      "webp": "bass-pov-bg.webp"
     },
     "drums": {
-      "webp": "drums-pov-bg.webp",
-      "png": "drums-pov-bg.png"
+      "webp": "drums-pov-bg.webp"
     },
     "piano": {
-      "webp": "piano-pov-bg.webp",
-      "png": "piano-pov-bg.png"
+      "webp": "piano-pov-bg.webp"
     },
     "vocals": {
-      "webp": "vocals-pov-bg.webp",
-      "png": "vocals-pov-bg.png"
+      "webp": "vocals-pov-bg.webp"
     }
   }
 }

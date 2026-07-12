@@ -2401,14 +2401,13 @@
     function _bgBackgroundColors(id) { return _bgThemeColors(id); }
     function _bgHighwayColors(id) { return _bgThemeColors(id); }
     const VENUE_SCENE_ASSET_BASE = '/static/assets/venue/themes/small-club/';
-    const VENUE_BG_PLATE_PNG = 'bg-plate.png';
     const VENUE_BG_PLATE_WEBP = 'bg-plate.webp';
     const VENUE_INSTRUMENT_PLATES = {
-        guitar: { webp: 'guitar-pov-bg.webp', png: 'guitar-pov-bg.png' },
-        bass: { webp: 'bass-pov-bg.webp', png: 'bass-pov-bg.png' },
-        drums: { webp: 'drums-pov-bg.webp', png: 'drums-pov-bg.png' },
-        piano: { webp: 'piano-pov-bg.webp', png: 'piano-pov-bg.png' },
-        vocals: { webp: 'vocals-pov-bg.webp', png: 'vocals-pov-bg.png' },
+        guitar: { webp: 'guitar-pov-bg.webp' },
+        bass: { webp: 'bass-pov-bg.webp' },
+        drums: { webp: 'drums-pov-bg.webp' },
+        piano: { webp: 'piano-pov-bg.webp' },
+        vocals: { webp: 'vocals-pov-bg.webp' },
     };
     let _venueSceneOverride = false;
     let _venueMoodState = 'idle';
@@ -2529,9 +2528,7 @@
         const base = VENUE_SCENE_ASSET_BASE;
         return [
             base + plate.webp,
-            base + plate.png,
             base + VENUE_BG_PLATE_WEBP,
-            base + VENUE_BG_PLATE_PNG,
         ];
     }
 

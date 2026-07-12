@@ -17,10 +17,6 @@ too sharp / too flat / not played).
 
 ## Docs
 
-- **[Technical Spec](docs/NOTE_FAILURE_SPEC.md)** — architecture, matching
-  algorithm, rendering design, data structures, integration points
-- **[Implementation Plan](docs/NOTE_FAILURE_PLAN.md)** — 7 phases from
-  detection foundation through section grading and polish
-- **Note Detection Plugin Plan** — see the
+- **Note Detection Plugin** — see the
   [slopsmith-plugin-notedetect](https://github.com/topkoa/slopsmith-plugin-notedetect)
   repository (Phase 0 foundation)

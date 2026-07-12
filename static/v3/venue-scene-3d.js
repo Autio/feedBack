@@ -9,7 +9,6 @@
 
     const THEME_ID = 'small-club';
     const ASSET_BASE = '/static/assets/venue/themes/small-club/';
-    const BG_PLATE = 'bg-plate.png';
     const BG_PLATE_WEBP = 'bg-plate.webp';
 
     let _active = false;
@@ -216,7 +215,6 @@
     const api = {
         THEME_ID,
         ASSET_BASE,
-        BG_PLATE,
         BG_PLATE_WEBP,
         activate,
         deactivate,

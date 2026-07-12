@@ -18,26 +18,18 @@ const ASSET_DIR = path.join(__dirname, '..', '..', 'static', 'assets', 'venue', 
 
 test('small-club venue scene asset files exist', () => {
     assert.ok(fs.existsSync(path.join(ASSET_DIR, 'manifest.json')));
-    assert.ok(fs.existsSync(path.join(ASSET_DIR, 'bg-plate.png')));
+    assert.ok(fs.existsSync(path.join(ASSET_DIR, 'bg-plate.webp')));
     const manifest = JSON.parse(fs.readFileSync(path.join(ASSET_DIR, 'manifest.json'), 'utf8'));
     assert.equal(manifest.id, 'small-club');
     assert.equal(manifest.name, 'Small Club');
     assert.equal(manifest.type, 'generated-original');
-    assert.equal(manifest.version, 10);
+    assert.equal(manifest.version, 11);
     assert.equal(manifest.assets.bgPlate, 'bg-plate.webp');
-    assert.equal(manifest.assets.fallbackBgPlate, 'bg-plate.png');
-    assert.equal(manifest.instrumentPlates.guitar.png, 'guitar-pov-bg.png');
-    assert.equal(manifest.instrumentPlates.bass.webp, 'bass-pov-bg.webp');
-    assert.equal(manifest.instrumentPlates.drums.png, 'drums-pov-bg.png');
-    assert.equal(manifest.instrumentPlates.piano.png, 'piano-pov-bg.png');
-    assert.equal(manifest.instrumentPlates.vocals.png, 'vocals-pov-bg.png');
-    assert.equal(manifest.instrumentPlates.vocals.webp, 'vocals-pov-bg.webp');
-    for (const optionalVocals of ['vocals-pov-bg.png', 'vocals-pov-bg.webp']) {
-        const vocalsPath = path.join(ASSET_DIR, optionalVocals);
-        if (fs.existsSync(vocalsPath)) {
-            const st = fs.statSync(vocalsPath);
-            assert.ok(st.isFile() && st.size > 0, `${optionalVocals} must be a non-empty file when installed`);
-        }
+    for (const [pov, plates] of Object.entries(manifest.instrumentPlates)) {
+        assert.equal(plates.webp, `${pov}-pov-bg.webp`);
+        const platePath = path.join(ASSET_DIR, plates.webp);
+        assert.ok(fs.existsSync(platePath), `${plates.webp} must ship with the theme`);
+        assert.ok(fs.statSync(platePath).size > 0, `${plates.webp} must be non-empty`);
     }
 });
 
@@ -74,22 +66,19 @@ test('highway_3d venue plate chain falls back to generic bg-plate', () => {
     const chainFn = src.match(/function _venuePlateUrlChain\(pov\)\s*\{[\s\S]*?\n\s*\}/);
     assert.ok(chainFn, '_venuePlateUrlChain missing');
     assert.match(chainFn[0], /plate\.webp/);
-    assert.match(chainFn[0], /plate\.png/);
     assert.match(chainFn[0], /VENUE_BG_PLATE_WEBP/);
-    assert.match(chainFn[0], /VENUE_BG_PLATE_PNG/);
 });
 
 test('highway_3d venue style loads instrument POV plates with fallback', () => {
     const src = fs.readFileSync(H3D_JS, 'utf8');
     assert.match(src, /VENUE_SCENE_ASSET_BASE\s*=\s*'\/static\/assets\/venue\/themes\/small-club\/'/);
     assert.match(src, /VENUE_INSTRUMENT_PLATES/);
-    assert.match(src, /guitar-pov-bg\.png/);
-    assert.match(src, /bass-pov-bg\.png/);
-    assert.match(src, /drums-pov-bg\.png/);
-    assert.match(src, /piano-pov-bg\.png/);
-    assert.match(src, /vocals-pov-bg\.png/);
+    assert.match(src, /guitar-pov-bg\.webp/);
+    assert.match(src, /bass-pov-bg\.webp/);
+    assert.match(src, /drums-pov-bg\.webp/);
+    assert.match(src, /piano-pov-bg\.webp/);
+    assert.match(src, /vocals-pov-bg\.webp/);
     assert.match(src, /karaoke|vocal|vocals/);
-    assert.match(src, /VENUE_BG_PLATE_PNG\s*=\s*'bg-plate\.png'/);
     assert.match(src, /VENUE_BG_PLATE_WEBP\s*=\s*'bg-plate\.webp'/);
     assert.match(src, /_venuePlateUrlChain/);
     assert.match(src, /_venueLoadPlateForPov/);
@@ -183,7 +172,6 @@ test('lyrics visibility during guitar practice does not force vocals POV', () =>
 });
 
 test('venue-scene-3d exports bg plate asset ids', () => {
-    assert.equal(venueScene.BG_PLATE, 'bg-plate.png');
     assert.equal(venueScene.BG_PLATE_WEBP, 'bg-plate.webp');
     assert.equal(venueScene.ASSET_BASE, '/static/assets/venue/themes/small-club/');
 });
