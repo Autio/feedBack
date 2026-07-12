@@ -17,6 +17,6 @@ too sharp / too flat / not played).
 
 ## Docs
 
-- **Note Detection Plugin** — see the
+- **Note Detection Plugin**: see the
   [slopsmith-plugin-notedetect](https://github.com/topkoa/slopsmith-plugin-notedetect)
   repository (Phase 0 foundation)

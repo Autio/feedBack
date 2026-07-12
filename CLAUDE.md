@@ -1,4 +1,4 @@
-# FeedBack — Developer Guide
+# FeedBack: Developer Guide
 
 FeedBack is a self-hosted web app for browsing, playing, and practicing interactive
 music notation (a guitar-hero-style note highway for real instruments), built around
@@ -59,16 +59,16 @@ bash scripts/build-tailwind.sh  # regenerate static/tailwind.min.css (CI diffs i
 
 CI (`.github/workflows/ci.yml`) runs pytest, the JS tests, ESLint, a plugin-manifest
 validator, a Tailwind freshness check, and a grep that bans `print()` in
-`server.py`/`lib/`/plugin routes — use the logger from `lib/logging_setup.py`.
+`server.py`/`lib/`/plugin routes; use the logger from `lib/logging_setup.py`.
 
 ## Song formats
 
-- **Sloppak / feedpak** — open song package (zip or directory): `manifest.yaml`,
+- **Sloppak / feedpak**: open song package (zip or directory): `manifest.yaml`,
   `arrangements/*.json`, `stems/*.ogg`, optional `cover.jpg` and `lyrics.json`.
   Spec: [got-feedback/feedpak-spec](https://github.com/got-feedback/feedpak-spec);
   local pointer [docs/sloppak-spec.md](docs/sloppak-spec.md), hand-editing guide
   [docs/sloppak-hand-editing.md](docs/sloppak-hand-editing.md).
-- **Loose folder** — directory with arrangement XML + audio file (+ optional
+- **Loose folder**: directory with arrangement XML + audio file (+ optional
   `manifest.json`, art). See `lib/loosefolder.py`.
 
 ## Plugins
@@ -77,22 +77,22 @@ Each plugin is a directory under `plugins/<id>/` with a `plugin.json` manifest
 (schema: [docs/plugin-manifest.schema.json](docs/plugin-manifest.schema.json)).
 Only `id` and `name` are required. A plugin can ship any combination of:
 
-- `screen`/`script` — frontend page injected by `static/js/plugin-loader.js`.
+- `screen`/`script`: frontend page injected by `static/js/plugin-loader.js`.
   Set `scriptType: "module"` for a native ES-module graph
   ([docs/plugin-modules.md](docs/plugin-modules.md)).
-- `routes` — `routes.py` exporting `setup(app, context)`. The `context` dict carries
+- `routes`: `routes.py` exporting `setup(app, context)`. The `context` dict carries
   `config_dir`, `meta_db`, `library_providers`, `register_library_provider`,
-  `load_sibling` (namespaced sibling imports — never bare-import a sibling module),
+  `load_sibling` (namespaced sibling imports, never bare-import a sibling module),
   and `log` (use it; `print()` fails CI).
-- `styles` — self-hosted compiled CSS under `assets/`
+- `styles`: self-hosted compiled CSS under `assets/`
   ([docs/plugin-styles.md](docs/plugin-styles.md)). Never the Tailwind Play CDN.
-- `settings.server_files` / `diagnostics` — opt-ins for settings export and the
+- `settings.server_files` / `diagnostics`: opt-ins for settings export and the
   diagnostics bundle ([docs/diagnostics-bundle-spec.md](docs/diagnostics-bundle-spec.md)).
-- `type: "visualization"` — the plugin provides a highway renderer.
+- `type: "visualization"`: the plugin provides a highway renderer.
 
 **Visualization contract**: export a factory on `window.feedBackViz_<id>` returning
 `{ contextType, init(canvas, bundle), draw(bundle), resize(w, h), destroy() }`.
-The bundle object is reused across frames — never cache it. Use
+The bundle object is reused across frames; never cache it. Use
 `bundle.lowerBoundT`/`lowerBoundTime` to cull to the visible window instead of
 scanning full chart arrays per frame. Overlays (layers on top of the active
 renderer) manage their own canvas + rAF and read state via the `highway.get*()`
@@ -100,7 +100,7 @@ getters. Player-chrome injection points and v3 UI details:
 [docs/plugin-v3-ui.md](docs/plugin-v3-ui.md).
 
 **Performance rule**: never run `querySelector`/`querySelectorAll` in `draw()`, a
-rAF loop, a short interval, or a broad `MutationObserver` — resolve elements once
+rAF loop, a short interval, or a broad `MutationObserver`; resolve elements once
 at mount and cache them. Plugins share the main thread with the 60 fps highway.
 
 ## WebSocket highway protocol
@@ -111,14 +111,14 @@ at mount and cache them. Plugins share the main thread with the 60 fps highway.
 `phrases*?` -> `ready`. Do not finalize rendering until `ready`. Note fields are
 compact: `t` (time), `s` (string), `f` (fret), `sus`, `ho`, `po`, `sl`, `bn`.
 Multiple simultaneous connections to the same song are by design (splitscreen,
-lyrics panes) — don't multiplex.
+lyrics panes); don't multiplex.
 
 ## Conventions
 
 - **Frontend**: vanilla JS + fetch + DOM. Globals: `highway`, `playSong()`,
   `showScreen()`, `createHighway()`, `window.feedBack` (event bus). `localStorage`
   for preferences (plugin keys prefixed with plugin id). Tailwind is a prebuilt
-  committed stylesheet — rebuild with `scripts/build-tailwind.sh` when you add
+  committed stylesheet; rebuild with `scripts/build-tailwind.sh` when you add
   classes. Keyboard shortcuts via `window.registerShortcut({key, description,
   scope, handler})`.
 - **Backend**: FastAPI + uvicorn. SQLite via `MetadataDB` (thread-safe via lock).
@@ -128,18 +128,18 @@ lyrics panes) — don't multiplex.
   signed in [docs/size-exemptions.md](docs/size-exemptions.md).
 - **Git**: feature branches + PRs against upstream; short imperative commit
   subjects with a body explaining why. Plugins are often their own repos cloned
-  into `plugins/` — careful with `git clean`.
+  into `plugins/`; be careful with `git clean`.
 
 ## Pitfalls
 
-1. **playSong wrapper chain** — plugins wrap `window.playSong`; they load
+1. **playSong wrapper chain**: plugins wrap `window.playSong`; they load
    alphabetically and the last-loaded wrapper runs first. `await` inside a wrapper
-   yields — WebSocket messages can arrive before outer wrappers finish setup.
-2. **Highway flex layout** — `#highway` has `flex:1` inside fixed `#player`;
+   yields; WebSocket messages can arrive before outer wrappers finish setup.
+2. **Highway flex layout**: `#highway` has `flex:1` inside fixed `#player`;
    hiding it collapses the layout (use `margin-top:auto` on the controls).
-3. **v3 player chrome** — the transport auto-hides. Mount player controls into
+3. **v3 player chrome**: the transport auto-hides. Mount player controls into
    `window.feedBack.ui.playerControlSlot()`, not `#player-controls`
    (details in [docs/plugin-v3-ui.md](docs/plugin-v3-ui.md)).
-4. **Canvas context swapping** — `highway.setRenderer()` replaces the `<canvas>`
+4. **Canvas context swapping**: `highway.setRenderer()` replaces the `<canvas>`
    element when the new renderer's `contextType` differs; listen for
    `highway:canvas-replaced` on `window.feedBack` if you hold canvas refs.

@@ -8,18 +8,18 @@ your actual guitar, bass, keys, or drums.
 
 ## Features
 
-- **Note highway player** — Canvas-2D by default, optional 3D (WebGL) highway,
+- **Note highway player**: Canvas-2D by default, optional 3D (WebGL) highway,
   with stem mixing, looping, section practice, and adjustable playback speed.
-- **Open song format** — songs are `.feedpak`/`.sloppak` packages
+- **Open song format**: songs are `.feedpak`/`.sloppak` packages
   ([spec](https://github.com/got-feedback/feedpak-spec)): plain zip files with
   YAML manifest, JSON note data, and OGG stems. Hand-editable, no lock-in.
-- **Chart import** — converts Guitar Pro (GP3–GP8) and MusicXML files, or author
+- **Chart import**: converts Guitar Pro (GP3–GP8) and MusicXML files, or author
   charts in the built-in editor.
-- **Plugins** — tuner, 3D highways, minigames, achievements, practice tools, and
+- **Plugins**: tuner, 3D highways, minigames, achievements, practice tools, and
   more; anything beyond browse + play is a plugin.
-- **Progression** — XP paths per instrument, quests, stats, and a shop, if you
+- **Progression**: XP paths per instrument, quests, stats, and a shop, if you
   like that sort of thing.
-- **Single user, no cloud** — one Docker container, your files, no accounts.
+- **Single user, no cloud**: one Docker container, your files, no accounts.
 
 ## Quick start
 
@@ -40,9 +40,9 @@ python main.py        # needs ffmpeg on PATH for full audio support
 
 ## Documentation
 
-- [CLAUDE.md](CLAUDE.md) — architecture and developer guide
-- [docs/](docs/) — plugin authoring, song format, diagnostics
-- [CONTRIBUTING.md](CONTRIBUTING.md) — contribution and plugin licensing policy
+- [CLAUDE.md](CLAUDE.md): architecture and developer guide
+- [docs/](docs/): plugin authoring, song format, diagnostics
+- [CONTRIBUTING.md](CONTRIBUTING.md): contribution and plugin licensing policy
 
 ## License
 

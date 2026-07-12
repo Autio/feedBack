@@ -1361,7 +1361,7 @@ function createHighway() {
     function drawNowLine(W, H) {
         const y = H * 0.82;
         const hw = W * 0.26;
-        // Glow (styles are constants — i is 1..4, so a is 55/40/25/10)
+        // Glow (styles are constants: i is 1..4, so a is 55/40/25/10)
         for (let i = 1; i < 5; i++) {
             hwState.ctx.strokeStyle = _NOWLINE_GLOW[i - 1];
             hwState.ctx.lineWidth = 1;
