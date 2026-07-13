@@ -16,6 +16,10 @@ function loadAudioSession(options = {}) {
     return window;
 }
 
+function runBrowserSource(window, sourceText, filename) {
+    vm.runInContext(sourceText, window.__vmContext, { filename });
+}
+
 function runBrowserScript(window, relativePath) {
     const filePath = path.join(ROOT, relativePath);
     vm.runInContext(fs.readFileSync(filePath, 'utf8'), window.__vmContext, { filename: filePath });
@@ -181,6 +185,7 @@ function loadAudioMixer(window) {
 module.exports = {
     loadAudioSession,
     runBrowserScript,
+    runBrowserSource,
     captureEvents,
     diagnosticsSnapshot,
     storageEntries,

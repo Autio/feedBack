@@ -12,8 +12,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const screenJs = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 function extractBlock(src, signature) {
     const start = src.indexOf(signature);
@@ -32,7 +32,7 @@ function extractBlock(src, signature) {
 }
 
 test('applySize pins the .h3d-wrap overlay to the highway canvas rect box', () => {
-    const src = fs.readFileSync(screenJs, 'utf8');
+    const src = h3dSource();
     const fn = extractBlock(src, 'function applySize(w, h)');
     // Guarded on a laid-out canvas so we never pin to a zero box.
     assert.match(
@@ -56,7 +56,7 @@ test('applySize pins the .h3d-wrap overlay to the highway canvas rect box', () =
 });
 
 test('applySize fallback resets the static anchor and the computed height', () => {
-    const src = fs.readFileSync(screenJs, 'utf8');
+    const src = h3dSource();
     const fn = extractBlock(src, 'function applySize(w, h)');
     // The not-laid-out fallback must clear any stale pin styles (a prior pin
     // leaves top/left/right:auto/width set) back to the original
@@ -71,7 +71,7 @@ test('applySize fallback resets the static anchor and the computed height', () =
 });
 
 test('applySize records whether the overlay pin was applied (_wrapPinned)', () => {
-    const src = fs.readFileSync(screenJs, 'utf8');
+    const src = h3dSource();
     const fn = extractBlock(src, 'function applySize(w, h)');
     // Pin path sets the flag true; the not-laid-out fallback sets it false
     // so the rAF loop knows the pin is still pending.
@@ -85,7 +85,7 @@ test('the rAF loop re-pins the overlay once the canvas lays out (Codex P1)', () 
     // branch fires. A dedicated branch must re-run applySize so the overlay
     // gets pinned to the now-real canvas box instead of leaving the exposed
     // strip the fix was meant to close.
-    const src = fs.readFileSync(screenJs, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /else if\s*\(\s*!_wrapPinned\s*&&\s*box\.w\s*>\s*0\s*&&\s*box\.h\s*>\s*0\s*&&\s*highwayCanvas\.offsetWidth\s*>\s*0\s*&&\s*highwayCanvas\.offsetHeight\s*>\s*0\s*\)\s*\{\s*[\s\S]*?applySize\(\s*box\.w\s*,\s*box\.h\s*\)\s*;/,

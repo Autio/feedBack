@@ -13,8 +13,8 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 // Brace-balanced extraction so warm() / coercion checks scope to the
 // `function pool(...)` body (matching the helper shape used in
@@ -39,7 +39,7 @@ function extractBlock(src, signature) {
 }
 
 test('pool factory exposes warm(cap)', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     // The pool() factory's return object must include a `warm(cap)`
     // method. Scope the match to the factory body so an unrelated
     // future `warm(cap)` helper elsewhere in the file can't satisfy
@@ -49,7 +49,7 @@ test('pool factory exposes warm(cap)', () => {
 });
 
 test('pool.warm coerces cap to a non-negative integer', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     // Same scoping discipline as above — the coercion must live
     // inside the pool factory's warm() body, not anywhere else.
     const poolBody = extractBlock(src, 'function pool(parent, mk)');
@@ -61,7 +61,7 @@ test('pool.warm coerces cap to a non-negative integer', () => {
 });
 
 test('warm() is called at boardInit with renderer-scoped cap constants', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     // The note / chord / lane / beat cap constants live inside the
     // boardInit/initScene path (renderer-instance scope, not module
     // scope); each must exist as a const and drive at least one .warm()

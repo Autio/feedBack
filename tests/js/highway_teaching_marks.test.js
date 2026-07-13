@@ -8,6 +8,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
 function extractFn(src, name) {
     const start = src.indexOf('function ' + name);
@@ -22,7 +23,7 @@ function extractFn(src, name) {
 }
 
 function loadFn(file, name) {
-    const src = fs.readFileSync(path.join(__dirname, '..', '..', file), 'utf8');
+    const src = file === 'h3d' ? h3dSource() : fs.readFileSync(path.join(__dirname, '..', '..', file), 'utf8');
     return new Function('"use strict";' + extractFn(src, name) + `\nreturn ${name};`)();
 }
 
@@ -30,8 +31,8 @@ function loadFn(file, name) {
 // static/js/highway-geometry.js. Same bodies, byte-for-byte — only the file moved.
 const fingerLabel2D = loadFn('static/js/highway-geometry.js', 'teachingFingerLabel');
 const degreeLabel2D = loadFn('static/js/highway-geometry.js', 'teachingDegreeLabel');
-const fingerLabel3D = loadFn('plugins/highway_3d/screen.js', 'teachingFingerLabel');
-const degreeLabel3D = loadFn('plugins/highway_3d/screen.js', 'teachingDegreeLabel');
+const fingerLabel3D = loadFn('h3d', 'teachingFingerLabel');
+const degreeLabel3D = loadFn('h3d', 'teachingDegreeLabel');
 const strumGroupBuckets = loadFn('static/js/highway-draw.js', 'strumGroupBuckets');
 
 // ── teachingFingerLabel (fg) ─────────────────────────────────────────────────

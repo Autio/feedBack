@@ -7,9 +7,9 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
 const highwayJs = path.join(__dirname, '..', '..', 'static', 'highway.js');
-const highway3dJs = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 // Brace-balanced extraction so a future method that grows guards or
 // nested blocks doesn't get truncated by a naive `[^}]*\}` regex.
@@ -131,7 +131,7 @@ test('api.setVisible accepts bool / null and re-emits inline', () => {
 });
 
 test('3D Highway subscribes to highway:visibility and toggles wrap on hide', () => {
-    const src = fs.readFileSync(highway3dJs, 'utf8');
+    const src = h3dSource();
     // Scope to lifecycle blocks so unrelated / commented mentions
     // elsewhere in screen.js can't cause false positives.
     const initSceneBlock = extractBlock(src, 'function initScene()');

@@ -19,7 +19,7 @@ module.exports = {
         // + HUD markup) and settings.html. A broad ./*.{js,html} would also scan
         // THIS config (its comments mention class-like strings such as
         // text-[10px]) and emit them spuriously; tour.json is plain text.
-        './screen.js',
+        './src/**/*.js',
         './settings.html',
     ],
     theme: {

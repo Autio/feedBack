@@ -21,13 +21,13 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 let _src;
 /** Returns the cached 3D highway screen source under test. */
 function src() {
-    if (!_src) _src = fs.readFileSync(SCREEN_JS, 'utf8');
+    if (!_src) _src = h3dSource();
     return _src;
 }
 

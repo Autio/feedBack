@@ -17,11 +17,11 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 test('lean sustain rendering is the default (_leanSus starts true)', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /let\s+_leanSus\s*=\s*true\s*;/,
@@ -30,7 +30,7 @@ test('lean sustain rendering is the default (_leanSus starts true)', () => {
 });
 
 test('the full-quality look is an opt-out via localStorage h3d_full_sus', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /_leanSus\s*=\s*localStorage\.getItem\(\s*['"]h3d_full_sus['"]\s*\)\s*!==\s*['"]1['"]/,
@@ -39,7 +39,7 @@ test('the full-quality look is an opt-out via localStorage h3d_full_sus', () => 
 });
 
 test('exactly one element is gated behind the lean flag, and it is the rail bloom', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     // Only the additive rail bloom may hide behind the lean flag. If a future
     // edit re-gates the trail or ribbon outline behind !_leanSus, this count
     // climbs above 1 and the test fails — that's the regression guard.
@@ -57,7 +57,7 @@ test('exactly one element is gated behind the lean flag, and it is the rail bloo
 });
 
 test('the trail + ribbon outline always draw and use the hit/miss-aware material', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     // Outline material is hit/miss aware: miss -> mMissOutline, confirmed hit
     // -> bright, otherwise the default mSusOutline white border.
     assert.match(

@@ -7,6 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { h3dSource } = require('./helpers/h3d_source');
 
 const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
@@ -17,7 +18,7 @@ const FORBIDDEN_KEYS = ['customImageDataUrl', 'customImageName', 'customVideoNam
 const VALID_TYPES = new Set(['select', 'range', 'toggle']);
 
 function loadHighway3dStatics() {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     // Inject test exports right after the factory registration — a stable,
     // semantic anchor inside the IIFE — so harmless footer edits (a trailing
     // sourceMappingURL comment, extra whitespace, a different IIFE close

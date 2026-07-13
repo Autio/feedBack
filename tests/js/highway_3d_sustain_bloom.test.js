@@ -11,11 +11,11 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 test('a gaussian DataTexture helper (_makeGaussTex) drives the bloom falloff', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /function\s+_makeGaussTex\s*\(/,
@@ -29,7 +29,7 @@ test('a gaussian DataTexture helper (_makeGaussTex) drives the bloom falloff', (
 });
 
 test('the bloom rail material uses additive blending', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /mSusRailBloomBase\s*=\s*new\s+T\.MeshBasicMaterial\(\{[\s\S]*?blending:\s*T\.AdditiveBlending[\s\S]*?\}\)/,
@@ -40,7 +40,7 @@ test('the bloom rail material uses additive blending', () => {
 test('the bloom pool seeds meshes at renderOrder 4, behind the core rail (5)', () => {
     // renderOrder 4 keeps the bloom behind the core sustain rail (5) so the
     // glow reads as a trail rather than occluding the rail.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /pSusRailBloom\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*4\s*;[\s\S]*?\}\s*\)/,

@@ -9,11 +9,11 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 test('chordShapeCoveredByStandaloneNotes helper exists with the expected signature', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /function\s+chordShapeCoveredByStandaloneNotes\s*\(\s*ch\s*,\s*shape\s*,\s*notesArr\s*,\s*timeWin\s*\)/,
@@ -25,7 +25,7 @@ test('deferChordGems gates both synth and explicit+covered branches on note-stre
     // Either branch firing without coverage produces the empty-lavender-frame
     // regression PR #262 fixed. Pin both predicates so a refactor that drops
     // one gate fails the test.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /const\s+deferChordGems\s*=\s*\(\s*ch\.h3dSynth\s*&&\s*noteStreamCoversArpShape\(\)\s*\)\s*\|\|\s*inferredArpPattern\s*\|\|\s*\(\s*hsHintFrame\.explicit\s*&&\s*hsHintFrame\.covered\s*&&\s*noteStreamCoversArpShape\(\)\s*\)/,
@@ -37,7 +37,7 @@ test('noteStreamCoversArpShape is computed lazily (called, not eagerly bound)', 
     // Eager allocation regressed perf on dense charts (Copilot review on PR
     // #262). The shape must be a callable so short-circuit evaluation skips
     // the note-stream scan when neither gating branch needs it.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /const\s+noteStreamCoversArpShape\s*=\s*(?:\(\s*\)\s*=>|function(?:\s+\w+)?\s*\(\s*\))/,

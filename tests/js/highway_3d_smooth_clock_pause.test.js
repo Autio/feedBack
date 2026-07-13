@@ -17,9 +17,9 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
 const highwayJs = path.join(__dirname, '..', '..', 'static', 'highway.js');
-const highway3dJs = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 // Brace-balanced extraction (same helper shape as highway_note_state.test.js).
 function extractBlock(src, signature) {
@@ -60,7 +60,7 @@ test('core _makeBundle exposes isPlaying derived from the chart-clock anchor', (
 });
 
 test('smoothNow returns raw and re-anchors when the host reports not playing', () => {
-    const src = fs.readFileSync(highway3dJs, 'utf8');
+    const src = h3dSource();
     const fn = extractBlock(src, 'function smoothNow(bundle)');
     // Strict === false so downlevel hosts (isPlaying undefined) fall through
     // to the existing staleness-based interpolation cap.

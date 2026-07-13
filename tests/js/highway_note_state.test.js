@@ -10,13 +10,13 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
 const highwayJs = path.join(__dirname, '..', '..', 'static', 'highway.js');
 // R3c: _noteState moved to static/js/highway-state-primitives.js and gained an explicit
 // hwState first parameter — it has to, because createHighway() is a factory and a module
 // cannot import per-instance state without two panels sharing it.
 const primitivesJs = path.join(__dirname, '..', '..', 'static', 'js', 'highway-state-primitives.js');
-const highway3dJs = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 // Brace-balanced extraction (same helper shape as highway_visibility.test.js).
 function extractBlock(src, signature) {
@@ -138,7 +138,7 @@ test('default 2D renderer threads note state into drawNote / drawSustains / chor
 });
 
 test('3D highway captures bundle.getNoteState and overrides legacy hit/miss with the provider verdict', () => {
-    const src = fs.readFileSync(highway3dJs, 'utf8');
+    const src = h3dSource();
     assert.match(src, /_ndGetNoteState\s*=\s*\(bundle\s*&&\s*typeof\s+bundle\.getNoteState\s*===\s*['"]function['"]\)\s*\?\s*bundle\.getNoteState\s*:\s*null/, 'update() must capture bundle.getNoteState into _ndGetNoteState');
     // Provider verdict wins: miss => not _showHit; otherwise provider state
     // or the legacy fallback (`hit`) plus the pre-hit ghost window preview.
@@ -146,7 +146,7 @@ test('3D highway captures bundle.getNoteState and overrides legacy hit/miss with
 });
 
 test('3D highway captures _ndHasProvider via bundle.getNoteStateProvider (feedBack#254)', () => {
-    const src = fs.readFileSync(highway3dJs, 'utf8');
+    const src = h3dSource();
     // Detect-mode behavior — verdict-window cull extension, chord-frame
     // hold floor, and the smart drawNote cull — must be gated on a real
     // provider being registered, not on the always-present bundle.

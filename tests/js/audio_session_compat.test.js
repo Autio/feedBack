@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { loadAudioSession, runBrowserScript, installMixerDom, makeInputProvider, makeMonitoringProvider } = require('./audio_session_test_harness');
+const { loadAudioSession, runBrowserScript, runBrowserSource, installMixerDom, makeInputProvider, makeMonitoringProvider } = require('./audio_session_test_harness');
+const { h3dSource } = require('./helpers/h3d_source');
 
 function installAnalyserDom(window) {
     const audio = { addEventListener() {} };
@@ -46,7 +47,7 @@ test('legacy fader API remains compatible while bridge hits are attributed', asy
 test('legacy analyser fallback records bridge status without losing analyser output', () => {
     const window = loadAudioSession();
     installAnalyserDom(window);
-    runBrowserScript(window, 'plugins/highway_3d/screen.js');
+    runBrowserSource(window, h3dSource(), 'highway_3d-concat.js');
 
     const analyser = window.feedBackViz_highway_3d.__test.getAnalyserForBridgeTest();
     const bands = window.feedBackViz_highway_3d.__test.readBandsForBridgeTest();

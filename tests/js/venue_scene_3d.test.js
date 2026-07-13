@@ -8,11 +8,11 @@ const path = require('node:path');
 const venueScene = require('../../static/v3/venue-scene-3d.js');
 const venueViz = require('../../static/v3/venue-viz.js');
 const pov = require('../../static/v3/venue-instrument-pov.js');
+const { h3dSource } = require('./helpers/h3d_source');
 const APP_JS = path.join(__dirname, '..', '..', 'static', 'app.js');
 // The viz layer (setViz / the venue option / the picker) was carved out of
 // app.js into its own module (R3a).
 const VIZ_JS = path.join(__dirname, '..', '..', 'static', 'js', 'viz.js');
-const H3D_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 const INDEX_HTML = path.join(__dirname, '..', '..', 'static', 'v3', 'index.html');
 const ASSET_DIR = path.join(__dirname, '..', '..', 'static', 'assets', 'venue', 'themes', 'small-club');
 
@@ -62,7 +62,7 @@ test('stage lights SVG uses beam shapes not soft circles', () => {
 });
 
 test('highway_3d venue plate chain falls back to generic bg-plate', () => {
-    const src = fs.readFileSync(H3D_JS, 'utf8');
+    const src = h3dSource();
     const chainFn = src.match(/function _venuePlateUrlChain\(pov\)\s*\{[\s\S]*?\n\s*\}/);
     assert.ok(chainFn, '_venuePlateUrlChain missing');
     assert.match(chainFn[0], /plate\.webp/);
@@ -70,7 +70,7 @@ test('highway_3d venue plate chain falls back to generic bg-plate', () => {
 });
 
 test('highway_3d venue style loads instrument POV plates with fallback', () => {
-    const src = fs.readFileSync(H3D_JS, 'utf8');
+    const src = h3dSource();
     assert.match(src, /VENUE_SCENE_ASSET_BASE\s*=\s*'\/static\/assets\/venue\/themes\/small-club\/'/);
     assert.match(src, /VENUE_INSTRUMENT_PLATES/);
     assert.match(src, /guitar-pov-bg\.webp/);
@@ -96,7 +96,7 @@ test('highway_3d venue style loads instrument POV plates with fallback', () => {
 });
 
 test('plain 3D image style does not load venue POV plate', () => {
-    const src = fs.readFileSync(H3D_JS, 'utf8');
+    const src = h3dSource();
     const imageBlock = src.match(/image:\s*\{[\s\S]*?teardown\(s\)/);
     assert.ok(imageBlock, 'image style block missing');
     assert.doesNotMatch(imageBlock[0], /guitar-pov-bg/);
@@ -283,7 +283,7 @@ test('STRIP_OVERLAY_ENABLED remains false in venue mood fx', () => {
 });
 
 test('highway_3d venue style exposes motion APIs and background-only motion', () => {
-    const src = fs.readFileSync(H3D_JS, 'utf8');
+    const src = h3dSource();
     assert.match(src, /h3dVenueSceneSetMotionMode/);
     assert.match(src, /h3dVenueSceneGetState/);
     assert.match(src, /motionMode/);
@@ -302,7 +302,7 @@ test('highway_3d venue style exposes motion APIs and background-only motion', ()
 });
 
 test('off motion mode zeros profile and venue inactive forces effective off', () => {
-    const src = fs.readFileSync(H3D_JS, 'utf8');
+    const src = h3dSource();
     assert.match(src, /function _venueMotionProfile[\s\S]*breathe:\s*0,\s*parallax:\s*0/);
     assert.match(src, /function _venueEffectiveMotionMode\(\)[\s\S]*!_venueSceneOverride[\s\S]*return 'off'/);
 });
@@ -362,7 +362,7 @@ test('runtime safety: motion pass does not touch scoring detection timing or aud
     for (const rel of allowedTouched) {
         assert.ok(fs.existsSync(path.join(__dirname, '..', '..', rel)), rel);
     }
-    const h3d = fs.readFileSync(H3D_JS, 'utf8');
+    const h3d = h3dSource();
     assert.doesNotMatch(h3d, /v3-venue-mode-badge.*remove\('hidden'\)/);
     assert.equal(venueMood.STRIP_OVERLAY_ENABLED, false);
     for (const token of forbidden) {

@@ -7,10 +7,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
 const ROOT = path.join(__dirname, '..', '..');
 const HIGHWAY_JS = path.join(ROOT, 'static', 'highway.js');
-const SCREEN_JS = path.join(ROOT, 'plugins', 'highway_3d', 'screen.js');
 const CLAUDE_MD = path.join(ROOT, 'plugins', 'highway_3d', 'CLAUDE.md');
 
 function src(file) {
@@ -26,7 +26,7 @@ test('highway renderer bundles surface the core lefty flag', () => {
 });
 
 test('3D Highway defines lefty-aware fret-position helpers', () => {
-    const screen = src(SCREEN_JS);
+    const screen = h3dSource();
     assert.match(
         screen,
         /let\s+_leftyCached\s*=\s*false\s*;/,
@@ -50,7 +50,7 @@ test('3D Highway defines lefty-aware fret-position helpers', () => {
 });
 
 test('draw(bundle) handles lefty changes by flipping camera X state and rebuilding the board', () => {
-    const screen = src(SCREEN_JS);
+    const screen = h3dSource();
     assert.match(
         screen,
         /_leftyCached\s*=\s*!!bundle\.lefty\s*;/,
@@ -70,7 +70,7 @@ test('draw(bundle) handles lefty changes by flipping camera X state and rebuildi
 
 test('camera shoulder offset follows the cached lefty orientation', () => {
     assert.match(
-        src(SCREEN_JS),
+        h3dSource(),
         // The shoulder offset now feeds the base _camX (which the opt-in
         // free-camera bridge layers on top of) before cam.position.set (#771).
         /const\s+shoulderOffset\s*=\s*\(\s*_leftyCached\s*\?\s*-1\s*:\s*1\s*\)\s*\*\s*10\s*\*\s*K\s*;[\s\S]*?_camX\s*=\s*curX\s*\+\s*shoulderOffset/,

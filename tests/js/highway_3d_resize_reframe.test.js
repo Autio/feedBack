@@ -24,9 +24,9 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
-const src = fs.readFileSync(SCREEN_JS, 'utf8');
+const src = h3dSource();
 
 // ── Applied-size tracking ───────────────────────────────────────────────────
 

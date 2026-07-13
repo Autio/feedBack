@@ -11,11 +11,11 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 test('fret-spacing mode is read from the highway_3d.fretSpacing localStorage key', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /_h3dFretUniform\s*=\s*localStorage\.getItem\(\s*'highway_3d\.fretSpacing'\s*\)\s*!==\s*'logarithmic'/,
@@ -24,7 +24,7 @@ test('fret-spacing mode is read from the highway_3d.fretSpacing localStorage key
 });
 
 test('fretX switches between the uniform and logarithmic implementations', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /const\s+fretX\s*=\s*f\s*=>\s*_h3dFretUniform\s*\?\s*_fretXUni\(f\)\s*:\s*_fretXLog\(f\)/,
@@ -35,7 +35,7 @@ test('fretX switches between the uniform and logarithmic implementations', () =>
 test('h3dSetFretSpacing validates the mode against the two supported values', () => {
     // An unexpected input must not be persisted verbatim — it is coerced to
     // one of 'logarithmic' | 'uniform' before writing to localStorage.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /window\.h3dSetFretSpacing\s*=\s*mode\s*=>\s*\{[\s\S]*?mode\s*===\s*'logarithmic'\s*\?\s*'logarithmic'\s*:\s*'uniform'[\s\S]*?localStorage\.setItem\(\s*'highway_3d\.fretSpacing'/,
@@ -49,8 +49,8 @@ test('h3dSetFretSpacing applies the change live, not via a page reload', () => {
     // a 'fretSpacing' change so mounted panels rebuild in place — same path as
     // every other 3D-highway setting. Reintroducing location.reload() here is
     // the regression this guards against.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
-    const setter = src.match(/window\.h3dSetFretSpacing\s*=\s*mode\s*=>\s*\{[\s\S]*?\n    \};/);
+    const src = h3dSource();
+    const setter = src.match(/window\.h3dSetFretSpacing\s*=\s*mode\s*=>\s*\{[\s\S]*?\n\};/);
     assert.ok(setter, 'h3dSetFretSpacing assignment must be present');
     assert.doesNotMatch(
         setter[0],
@@ -65,7 +65,7 @@ test('h3dSetFretSpacing applies the change live, not via a page reload', () => {
 });
 
 test('the fretSpacing change rebuilds a mounted board live', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /changedKey\s*===\s*'fretSpacing'[\s\S]*?if\s*\(fretG\)\s*buildBoard\(\)/,

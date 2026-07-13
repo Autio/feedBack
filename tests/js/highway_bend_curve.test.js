@@ -7,6 +7,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
 function extractFn(src, name) {
     const start = src.indexOf('function ' + name);
@@ -21,14 +22,14 @@ function extractFn(src, name) {
 }
 
 function loadFn(file, name) {
-    const src = fs.readFileSync(path.join(__dirname, '..', '..', file), 'utf8');
+    const src = file === 'h3d' ? h3dSource() : fs.readFileSync(path.join(__dirname, '..', '..', file), 'utf8');
     return new Function('"use strict";' + extractFn(src, name) + `\nreturn ${name};`)();
 }
 
 // R3c: the PURE geometry/label primitives were carved out of highway.js into
 // static/js/highway-geometry.js. Same bodies, byte-for-byte — only the file moved.
 const bnvNormalizedPoints = loadFn('static/js/highway-geometry.js', 'bnvNormalizedPoints');
-const bnvSampleAt = loadFn('plugins/highway_3d/screen.js', 'bnvSampleAt');
+const bnvSampleAt = loadFn('h3d', 'bnvSampleAt');
 
 // ── bnvNormalizedPoints (2D) ─────────────────────────────────────────────────
 

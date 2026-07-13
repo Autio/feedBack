@@ -11,14 +11,14 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { h3dSource } = require('./helpers/h3d_source');
 
-const SCREEN_JS = path.join(__dirname, '..', '..', 'plugins', 'highway_3d', 'screen.js');
 
 test('sustain rails are gated on multi-note chords with a known box width within AHEAD', () => {
     // Each chord in a sequence (including repeats) draws a rail from its onset
     // to the next chord's onset, chaining together to cover the full handshape
     // duration visually. Single notes have no chord frame to anchor a rail to.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /if\s*\(\s*chShape\.size\s*>\s*1\s*&&\s*chordOpenBoxW\s*!=\s*null\s*&&\s*chDt\s*<\s*AHEAD\s*\)/,
@@ -27,7 +27,7 @@ test('sustain rails are gated on multi-note chords with a known box width within
 });
 
 test('sustain rails pick arpeggio color for arpeggio frames, teal otherwise', () => {
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /chordHighwayLavenderArpVisual\s*\?\s*ARPEGGIO_RIM_BLUE_HEX\s*:\s*CHORD_BOX_TEAL_HEX/,
@@ -40,7 +40,7 @@ test('sustain-rail pool meshes keep renderOrder 5 so strings (7) stay on top', (
     // of the rail. Chord frame edges are Z-proportional [48,698] and note gems
     // are Z-proportional [50,700], so the flat seed value does not conflict —
     // emitSusStrip() assigns its own Z-proportional RO per segment at draw time.
-    const src = fs.readFileSync(SCREEN_JS, 'utf8');
+    const src = h3dSource();
     assert.match(
         src,
         /pSusRail\s*=\s*pool\([^)]*,\s*\(\)\s*=>\s*\{[\s\S]*?m\.renderOrder\s*=\s*5\s*;[\s\S]*?\}\s*\)/,
