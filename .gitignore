@@ -27,6 +27,8 @@ plugins/achievements/__pycache__/
 !plugins/highway_3d/
 !plugins/highway_3d/**
 plugins/highway_3d/__pycache__/
+!plugins/highway_3d_lite/
+!plugins/highway_3d_lite/**
 !plugins/folder_library/
 !plugins/folder_library/**
 plugins/folder_library/__pycache__/

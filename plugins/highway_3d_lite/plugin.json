@@ -1,0 +1,10 @@
+{
+    "id": "highway_3d_lite",
+    "name": "3D Highway Lite",
+    "version": "1.0.0",
+    "type": "visualization",
+    "bundled": true,
+    "script": "screen.js",
+    "description": "Barebones 3D note highway: the chart, the strings, nothing else.",
+    "category": "game"
+}
