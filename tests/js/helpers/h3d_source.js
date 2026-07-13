@@ -12,11 +12,26 @@ const PLUGIN_DIR = path.join(ROOT, 'plugins', 'highway_3d');
 const SRC_DIR = path.join(PLUGIN_DIR, 'src');
 
 function srcFiles() {
+    // Topologically sort the module tree by its import statements so the
+    // concatenation evaluates in real dependency order (a const initializer
+    // may read an import at eval time).
     const files = fs.readdirSync(SRC_DIR).filter((f) => f.endsWith('.js')).sort();
-    // main.js stitches the tree together; it goes last so its top-level code
-    // sees every other module's declarations when the concatenation is eval'd.
-    const rest = files.filter((f) => f !== 'main.js');
-    return [...rest, 'main.js'].map((f) => path.join(SRC_DIR, f));
+    const deps = new Map(files.map((f) => {
+        const src = fs.readFileSync(path.join(SRC_DIR, f), 'utf8');
+        const ds = [...src.matchAll(/^import[^;]*?from\s+'\.\/([\w-]+\.js)';/gm)].map((m) => m[1]);
+        return [f, ds];
+    }));
+    const ordered = [];
+    const seen = new Set();
+    const visit = (f) => {
+        if (seen.has(f)) return;
+        seen.add(f);
+        for (const d of deps.get(f) || []) visit(d);
+        ordered.push(f);
+    };
+    files.filter((f) => f !== 'main.js').forEach(visit);
+    visit('main.js');
+    return ordered.map((f) => path.join(SRC_DIR, f));
 }
 
 function stripModuleSyntax(src) {
