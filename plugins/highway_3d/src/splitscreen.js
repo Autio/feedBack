@@ -1,7 +1,6 @@
 // Splitscreen helpers: detect the splitscreen plugin and per-canvas focus,
 // plus the tuner keyboard shortcut registration.
 import { _toggleAspectPanel } from './aspect-panel.js';
-import { wide } from './geometry.js';
 
 export function _ssActive() {
     const ss = window.feedBackSplitscreen;

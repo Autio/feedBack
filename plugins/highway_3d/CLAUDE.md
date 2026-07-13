@@ -1,22 +1,31 @@
 # 3D Highway Plugin — AI Maintainer Guide
 
-This guide tells future AI assistants where each visual element lives in `screen.js`, what controls it, and the gotchas to watch for. The goal is for small polishes (color tweaks, sizing, animation timing, add/remove a label) to land in the right place on the first try without grep spelunking.
+This guide tells maintainers where each visual element lives, what controls it, and the gotchas to watch for. The goal is for small polishes (color tweaks, sizing, animation timing, add/remove a label) to land in the right place on the first try without grep spelunking.
 
-The whole renderer is **one file** — `screen.js`, wrapped in an IIFE, registered as `window.feedBackViz_highway_3d` (a feedBack#36 setRenderer factory). No imports beyond Three.js loaded from the vendored `/static/vendor/three/three.module.min.js` (pinned r170; swapped from CDN when bundled into core).
+The plugin is a build-free ES-module tree: `screen.js` is a one-line entry that imports `src/main.js` (manifest `scriptType: "module"`). `src/main.js` registers `window.feedBackViz_highway_3d` (a feedBack#36 setRenderer factory) and holds the per-instance renderer; the page-global subsystems live in their own modules under `src/`. Three.js is loaded from the vendored `/static/vendor/three/three.module.min.js` (pinned r170).
 
-**Styling (feedBack `styles` capability).** This plugin owns its Tailwind CSS: it ships `assets/plugin.css` and declares `"styles": "assets/plugin.css"` in `plugin.json`, so core's prebuilt `static/tailwind.min.css` no longer scans it (it's excluded from core's content globs). The frontend injects `assets/plugin.css` as a `<link>` when the renderer activates. This is the one maintainer-time build step: after you add/change a Tailwind class in `screen.js` or `settings.html`, run `bash build-tailwind.sh` (pinned `tailwindcss@3.4.19`, `corePlugins.preflight=false` — utilities only) and **bump the `version` in `plugin.json`** so the injected `<link>`'s `?v=` cache-buster fetches the fresh file. The generated `assets/plugin.css` is committed; end users never build. See [docs/plugin-styles.md](../../docs/plugin-styles.md).
+**Styling (feedBack `styles` capability).** This plugin owns its Tailwind CSS: it ships `assets/plugin.css` and declares `"styles": "assets/plugin.css"` in `plugin.json`, so core's prebuilt `static/tailwind.min.css` no longer scans it (it's excluded from core's content globs). The frontend injects `assets/plugin.css` as a `<link>` when the renderer activates. This is the one maintainer-time build step: after you add/change a Tailwind class in `screen.js` or `settings.html`, run `bash build-tailwind.sh` (pinned `tailwindcss@3.4.19`, utilities only; the config scans `src/**/*.js` and `settings.html`) and **bump the `version` in `plugin.json`** so the injected `<link>`'s `?v=` cache-buster fetches the fresh file. The generated `assets/plugin.css` is committed; end users never build. See [docs/plugin-styles.md](../../docs/plugin-styles.md).
 
 > **Navigation note:** This guide references functions by name and uses the existing banner comments (`/* ── Scene initialisation ─ */`, etc.) as section anchors. Line numbers are deliberately avoided so this stays correct as the file evolves. Use `Grep` for the function name or banner text to jump to a section.
 
 ## File structure at a glance
 
-The file is laid out top-to-bottom as:
+```
+screen.js               entry: import './src/main.js'
+src/
+  geometry.js           constants (S_COL palette, SCALE, K, fret/string sizes,
+                        camera, fog) + pure chart math (fretX, fretMid, dZ,
+                        computeBPM, lane/anchor bounds, render-order layers)
+  three-loader.js       loadThree(): lazy, memoized vendored Three.js; live `T`
+  splitscreen.js        _ssActive, _ssIsCanvasFocused, tuner shortcut
+  butterchurn.js        audio-reactive MilkDrop background + its panel
+  aspect-panel.js       wide-pane framing overrides + floating tuner panel
+  background.js         analyser bridge, BG_THEMES, venue stage scene,
+                        settings store, every window.h3dBgSet* setter
+  main.js               createFactory() and registration
+```
 
-1. **Constants block** — palette (`S_COL`), scale (`SCALE`, `K`), fret/string counts, geometry sizes, camera, fog
-2. **Pure helpers** — `fretX`, `fretMid`, `dZ`, `computeBPM`
-3. **Three.js loader** — `loadThree()` (loads vendored `/static/vendor/three/three.module.min.js`, memoized)
-4. **Splitscreen helpers** — `_ssActive`, `_ssIsCanvasFocused` (read `window.feedBackSplitscreen`)
-5. **`createFactory()`** — the rest of the file is one big closure
+`src/main.js` holds **`createFactory()`** — the per-instance renderer closure
    - Per-instance state (Three.js refs, pools, camera state, lifecycle flags)
    - `txtMat()` text-sprite cache, `pool()` factory
    - `drawChordDiagram()` — 2D canvas chord diagram (top-left overlay)

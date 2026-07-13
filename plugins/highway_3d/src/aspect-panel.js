@@ -1,6 +1,6 @@
 // Wide-pane framing: per-pane camera tuning overrides (localStorage-backed)
 // and the floating tuning panel that edits them live.
-import { BASE_VFOV, HORPLUS_MIN_VFOV, wide } from './geometry.js';
+import { BASE_VFOV, HORPLUS_MIN_VFOV } from './geometry.js';
 
 // ── Wide-pane framing: live tuner bridge + panel ──────────────────────────
 // window.__h3dAspectTune is the single source of truth the renderer reads
@@ -60,7 +60,9 @@ let _aspectEditTarget = '';
 let _aspectPanesDirty = true;
 // Monotonic counter for the per-instance fallback key (when a pane has no
 // arrangement name to key by).
-export let _aspectPaneCounter = 0;
+let _aspectPaneCounter = 0;
+// Allocates a fresh pane uid (counters cannot be incremented through an import).
+export function _nextAspectPaneUid() { return ++_aspectPaneCounter; }
 function _aspectNowMs() {
     try { if (performance && performance.now) return performance.now(); } catch (e) {}
     try { return Date.now(); } catch (e) { return 0; }   // keep pruning functional

@@ -1727,7 +1727,7 @@ export const BG_STYLES = {
  *  Per-instance counter
  * ====================================================================== */
 
-export let _nextInstanceId = 0;
+
 
 /* ======================================================================
  *  Factory — feedBack#36 setRenderer contract

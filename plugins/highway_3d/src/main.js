@@ -6,7 +6,7 @@
 // main player and per-panel in splitscreen without any architectural
 // changes.
 
-import { _aspectPaneCounter, _aspectPaneKey, _aspectRegisterPane, _resolveTuneFor } from './aspect-panel.js';
+import { _nextAspectPaneUid, _aspectPaneKey, _aspectRegisterPane, _resolveTuneFor } from './aspect-panel.js';
 import {
     BG_DEFAULTS,
     BG_STYLES,
@@ -23,7 +23,6 @@ import {
     _bgSubscribe,
     _bgUnsubscribe,
     _freeCamFor,
-    _nextInstanceId,
     _venueSceneOverride,
     _venueSwapPlateIfNeeded,
 } from './background.js';
@@ -193,10 +192,12 @@ import {
     resolveStringCount,
     slideOffsetWorldX,
     slideTrailEnd,
-    wide,
 } from './geometry.js';
 import { _registerTunerShortcut, _ssActive, _ssIsCanvasFocused } from './splitscreen.js';
 import { T, loadThree } from './three-loader.js';
+
+// Monotonic id for renderer instances (one per panel under splitscreen).
+let _nextInstanceId = 0;
 
 function createFactory() {
     const _instanceId = ++_nextInstanceId;
@@ -11564,7 +11565,7 @@ function createFactory() {
             }
             _destroyed = _isReady = false;
             _isFocused = true;
-            if (!_paneUid) _paneUid = ++_aspectPaneCounter;   // fallback pane id (no-arrangement panes)
+            if (!_paneUid) _paneUid = _nextAspectPaneUid();   // fallback pane id (no-arrangement panes)
             _registerTunerShortcut();   // session-global tuner shortcut (self-guarded)
             const myToken = ++_initToken;
             highwayCanvas = canvas;
