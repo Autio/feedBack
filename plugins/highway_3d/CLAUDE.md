@@ -21,7 +21,14 @@ src/
   aspect-panel.js       wide-pane framing overrides + floating tuner panel
   background.js         analyser bridge, BG_THEMES, venue stage scene,
                         settings store, every window.h3dBgSet* setter
-  main.js               createFactory() and registration
+  chart-analysis.js     chord shapes, hand-shape merging, arpeggio inference,
+                        lane rail bounds (per-instance caches inside)
+  text-sprites.js       txtMat label cache + technique-marker materials,
+                        GPU disposal behind dispose()
+  hud-overlays.js       2D overlays: chord diagram (+render cache),
+                        section/tone HUDs, lyrics banner
+  main.js               createFactory(): the residual draw core (initScene,
+                        update, drawNote, camera, lifecycle) + registration
 ```
 
 `src/main.js` holds **`createFactory()`** — the per-instance renderer closure

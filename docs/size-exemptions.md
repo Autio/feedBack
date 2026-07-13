@@ -22,7 +22,7 @@ without a *signed* exemption" is unenforceable.
 | Repo / file | Lines (7-07) | Ceiling | Rationale | Signer | Review |
 |---|---|---|---|---|---|
 | core `static/highway.js` → residual `renderer-2d.js` (post-split) | ~2,400–2,900 est. | **3,000** | 60 fps hot path; no module boundary inside the per-frame loop | Byron | after the highway.js split |
-| core `plugins/highway_3d/` → residual renderer | sized at split; likely **>3,000** | set at split, flagged now | same hot-path rule; the draw core can't be cut without behavior risk | Byron | after the highway_3d split |
+| core `plugins/highway_3d/src/main.js` (residual renderer) | 9,670 (7-13) | **10,000** | same hot-path rule; the split so far carved out geometry, background/venue, chart analysis, text sprites, and HUD overlays; what remains is the draw core (initScene, update, drawNote, camera, lifecycle) pending the shared-state split | Byron | after the update()/drawNote()/initScene() split |
 | core `static/capabilities.js` | 1,538 | 1,600 | cohesive registry + `window.feedBack` bus, 38 lines over; a split spends credibility for nothing | Byron | R4 |
 | tutorials `builtin/reading-the-highway/generate.py` | 1,818 | 2,000 | offline content generator, never imported at runtime, deps not in runtime requirements | Byron | if a 3rd builtin pack appears |
 | desktop `src/audio/NodeAddon.cpp` | 3,542 | as-is | C++, outside the ESM/routes playbooks; under active use-after-free crash work — do not churn | Byron | after crash-class work settles |
@@ -60,7 +60,7 @@ extractions and twenty-two `routers/` modules, plus lib/library_registry.py for 
 `lib/metadata_db.py` (4,373 — new in R3; the `MetadataDB` class alone is 4,018 lines
 and is a monolith in its own right, to be split per-table once the router train
 lands) · `static/v3/songs.js` (4,134) · `static/capabilities/audio-session.js`
-(2,974) · `plugins/highway_3d/screen.js` (15,656) · `plugins/keys_highway_3d/screen.js`
+(2,974) · `plugins/keys_highway_3d/screen.js`
 (3,780) · `plugins/drum_highway_3d/screen.js` (3,597) — and every monolith with a PR
 train in the refactor plan. Test files (e.g. `tests/test_plugins.py`) are out of scope
 by policy — the norm governs source files.

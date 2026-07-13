@@ -20,6 +20,7 @@ const importX = require('eslint-plugin-import-x');
 // Keep in sync; each entry corresponds to a signed row in the register.
 const SIZE_EXEMPTIONS = [
     { files: ['**/static/capabilities.js'], max: 1600 },
+    { files: ['**/plugins/highway_3d/src/main.js'], max: 10000 },
     { files: ['**/plugins/capability_inspector/screen.js'], max: 100000 },
     { files: ['**/plugins/folder_library/screen.js'], max: 100000 },
 ];
