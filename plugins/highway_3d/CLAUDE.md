@@ -18,7 +18,6 @@ src/
                         computeBPM, lane/anchor bounds, render-order layers)
   three-loader.js       loadThree(): lazy, memoized vendored Three.js; live `T`
   splitscreen.js        _ssActive, _ssIsCanvasFocused, tuner shortcut
-  butterchurn.js        audio-reactive MilkDrop background + its panel
   aspect-panel.js       wide-pane framing overrides + floating tuner panel
   background.js         analyser bridge, BG_THEMES, venue stage scene,
                         settings store, every window.h3dBgSet* setter

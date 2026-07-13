@@ -26,7 +26,6 @@ import {
     _venueSceneOverride,
     _venueSwapPlateIfNeeded,
 } from './background.js';
-import { _bcCreateController, _bcFfIdx, _bcIsDesktop, _bcLoadSettings } from './butterchurn.js';
 import {
     ACCENT_HALO_OP_FAR,
     ACCENT_HALO_OP_MID,
@@ -214,9 +213,6 @@ function createFactory() {
     // viewport + resume (Three re-uploads scene resources on the next render).
     let _ctxLost = false;
     let _onCtxLost = null, _onCtxRestored = null;
-    let bcCtrl = null; // Butterchurn audio-reactive background (the 'butterchurn' bg-style)
-    let _chartEnv = 0, _chartPrevT = -1, _bcBeatIdx = 0, _bcNoteIdx = 0, _bcChordIdx = 0, _bcTintTarget = null;
-    let _tintR = 20, _tintG = 24, _tintB = 40; // smoothed instrument-color tint for the bg
     // highway:visibility listener (feedBack#246). Hides the .h3d-wrap
     // overlay when feedBack's canvas is display:none'd (splitscreen
     // case). Without this, the wrap is a *sibling* of #highway so
@@ -2990,7 +2986,7 @@ function createFactory() {
         // itself force NVIDIA's utilisation-driven clock ramp on Linux.)
         ren = new T.WebGLRenderer({ antialias: true, powerPreference: 'high-performance', alpha: true });
         _probe = new T.Vector3();
-        ren.setClearColor(0x101820, _bcActive() ? 0 : 1);
+        ren.setClearColor(0x101820, 1);
         wrap.appendChild(ren.domElement);
 
         // WebGL context-loss recovery (see the _ctxLost declaration). Bound
@@ -4419,7 +4415,6 @@ function createFactory() {
         // setting without writing it back. Re-applied here so it sticks across
         // setting reloads.
         if (_bgReactiveOptOut) bgReactive = false;
-        if (bgStyleId === 'butterchurn') bgReactive = false; // Butterchurn owns the <audio> tap
         const newPaletteId = _bgReadSetting(panelKey, 'palette');
         let newPalette;
         if (newPaletteId === 'custom') {
@@ -4745,31 +4740,6 @@ function createFactory() {
     function _bgEffectiveStyleId() {
         return _venueSceneOverride ? 'venue' : bgStyleId;
     }
-    // The 'butterchurn' bg-style renders a WebGL MilkDrop canvas BEHIND a
-    // transparent highway via the self-contained _bc* controller (top of file),
-    // NOT a Three.js fog-scenery style (its scenery falls back to 'off'). Mount
-    // is idempotent and driven by the bg-style dropdown through _bgMountStyle.
-    function _bcActive() { return bgStyleId === 'butterchurn'; }
-    function _bcSyncMode() {
-        if (_bcActive()) {
-            // Recreate when there's no controller, or the last one died during
-            // async init (lib/WebGL failure) — a dead controller self-cleaned,
-            // so retry here instead of leaving the style permanently broken.
-            if ((!bcCtrl || (bcCtrl.dead && bcCtrl.dead())) && wrap) {
-                if (bcCtrl) bcCtrl = null;
-                // audioProvider reuses this instance's shared analyser (the
-                // fog scenery's #audio / stems tap) so the browser path never
-                // opens a second createMediaElementSource on #audio.
-                try { bcCtrl = _bcCreateController(wrap, () => canvasSize(highwayCanvas), () => { try { return _bgGetAnalyser(); } catch (e) { return null; } }); }
-                catch (e) { console.warn('[3D-Hwy] Butterchurn init failed', e); }
-            }
-            if (ren) ren.setClearColor(0x101820, 0); // transparent so the visualizer shows through
-        } else if (bcCtrl) {
-            try { bcCtrl.destroy(); } catch (e) {}
-            bcCtrl = null;
-            _applyBgTheme(); // restore the opaque themed clear
-        }
-    }
     function _bgMountStyle() {
         const effectiveId = _bgEffectiveStyleId();
         const style = BG_STYLES[effectiveId] || BG_STYLES.off;
@@ -4805,7 +4775,6 @@ function createFactory() {
         bgStage = stage;
         bgState = result;
         bgMountedStyleId = effectiveId;
-        _bcSyncMode();
     }
     function _bgUnmountStyle() {
         const mountedId = bgMountedStyleId || _bgEffectiveStyleId();
@@ -4868,9 +4837,7 @@ function createFactory() {
             scene.fog.color.setHex(0x080c12);
             scene.fog.near = FOG_START * 0.98;
             scene.fog.far = FOG_END * 0.98;
-            // Keep the clear transparent while Butterchurn is active so the
-            // venue scene doesn't occlude the visualizer behind the highway.
-            if (ren) ren.setClearColor(0x080c12, _bcActive() ? 0 : 1);
+            if (ren) ren.setClearColor(0x080c12, 1);
             if (ambLight) ambLight.intensity = 0.68;
         } else {
             // Restore the user's scene-color theme (clear + fog) rather than
@@ -4904,7 +4871,7 @@ function createFactory() {
         const bg = _bgBackgroundColors(bgThemeId);
         if (!_venueSceneOverride) {
             if (scene && scene.fog) scene.fog.color.setHex(bg.fog);
-            if (ren) ren.setClearColor(bg.clear, _bcActive() ? 0 : 1);
+            if (ren) ren.setClearColor(bg.clear, 1);
         }
         // --- Highway axis: board plane + lane ---
         const hw = _bgHighwayColors(hwThemeId);
@@ -11363,7 +11330,6 @@ function createFactory() {
         _fxElemSeen = new WeakSet();
         _fxRingMs = _fxBreakMs = -1e9;
         _chordVerdicts = new Map();
-        if (bcCtrl) { try { bcCtrl.destroy(); } catch (e) {} bcCtrl = null; }
         _bgUnmountStyle();
         bgGroup = null; _bgLastT = 0;
         _diagChord = null; _diagPrev = null; _diagPrevOpacity = 0; _diagPrevStartOpacity = 0; _diagPrevStartT = null;
@@ -11757,77 +11723,6 @@ function createFactory() {
                 }
             }
 
-            // Browser: the shared analyser can change between songs (a sloppak
-            // stems swap replaces it, often on a new context) — or may not have
-            // existed when the controller mounted. Keep the visualizer bound to
-            // the LIVE analyser by comparing against what the controller
-            // actually bound (boundAnalyser()), not a separately-tracked guess:
-            // cheap reconnect when it's the same context, full controller
-            // rebuild when the context changed (cross-context connectAudio is
-            // impossible). Only act once the viz is ready (ready()), so we
-            // don't thrash a controller that's still loading async. Done before
-            // the render block so a rebuild this frame just skips one bc frame
-            // (bcCtrl goes null) without affecting the highway's own render.
-            if (bcCtrl && !_bcIsDesktop() && bcCtrl.ready && bcCtrl.ready()) {
-                let a = null;
-                try { a = _bgGetAnalyser(); } catch (e) { a = null; }
-                const an = a && a.analyser;
-                const bound = bcCtrl.boundAnalyser ? bcCtrl.boundAnalyser() : null;
-                if (an && an !== bound) {
-                    if (!(bcCtrl.reconnectAudio && bcCtrl.reconnectAudio(a))) {
-                        // Context changed (or reconnect failed) — rebuild via the
-                        // proven destroy/create paths so the new context binds.
-                        try { bcCtrl.destroy(); } catch (e) {}
-                        bcCtrl = null;
-                        _bcSyncMode();
-                    }
-                }
-            }
-            if (bcCtrl) {
-                const cfg = _bcLoadSettings();
-                const _ct = bundle.currentTime || 0;
-                if (cfg.chartAccents) {
-                    if (_ct < _chartPrevT - 0.08 || _ct - _chartPrevT > 1.0) {
-                        _bcBeatIdx = _bcFfIdx(bundle.beats, _ct, 'time');
-                        _bcNoteIdx = _bcFfIdx(bundle.notes, _ct, 't');
-                        _bcChordIdx = _bcFfIdx(bundle.chords, _ct, 't');
-                    }
-                    const _beats = bundle.beats || [];
-                    while (_bcBeatIdx < _beats.length && _beats[_bcBeatIdx].time <= _ct) {
-                        const strong = _beats[_bcBeatIdx].measure !== undefined && _beats[_bcBeatIdx].measure !== -1;
-                        _chartEnv = Math.max(_chartEnv, strong ? 1.0 : 0.6);
-                        _bcBeatIdx++;
-                    }
-                    const _notes = bundle.notes || [];
-                    let _tintS = -1;
-                    while (_bcNoteIdx < _notes.length && _notes[_bcNoteIdx].t <= _ct) {
-                        _chartEnv = Math.max(_chartEnv, 0.6);
-                        _tintS = _notes[_bcNoteIdx].s;
-                        _bcNoteIdx++;
-                    }
-                    const _chords = bundle.chords || [];
-                    while (_bcChordIdx < _chords.length && _chords[_bcChordIdx].t <= _ct) {
-                        _chartEnv = Math.max(_chartEnv, 0.95);
-                        _bcChordIdx++;
-                    }
-                    if (_tintS >= 0 && activePalette && activePalette.length) {
-                        _bcTintTarget = activePalette[((_tintS % activePalette.length) + activePalette.length) % activePalette.length];
-                    }
-                    _chartPrevT = _ct;
-                    _chartEnv *= 0.86;
-                    bcCtrl.chart(_chartEnv * (cfg.chartStrength != null ? cfg.chartStrength : 1));
-                } else {
-                    bcCtrl.chart(0);
-                }
-                if (cfg.colorTint && _bcTintTarget != null) {
-                    const tr = (_bcTintTarget >> 16) & 255, tg = (_bcTintTarget >> 8) & 255, tb = _bcTintTarget & 255;
-                    _tintR += (tr - _tintR) * 0.06; _tintG += (tg - _tintG) * 0.06; _tintB += (tb - _tintB) * 0.06;
-                    bcCtrl.tint((Math.round(_tintR) << 16) | (Math.round(_tintG) << 8) | Math.round(_tintB), cfg.tintStrength != null ? cfg.tintStrength : 0.65);
-                } else {
-                    bcCtrl.tint(null, 0);
-                }
-                bcCtrl.render();
-            }
             {
                 const _jNow = performance.now();
                 const _jdt = _juiceLastT === 0 ? 1 / 60 : Math.min(0.05, (_jNow - _juiceLastT) / 1000);

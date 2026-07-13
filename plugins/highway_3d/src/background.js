@@ -251,7 +251,7 @@ export const BG_DEFAULTS = { style: 'particles', intensity: 0.5, reactive: true,
 // _bgCoerce must reject a stored h3d_bg_style='venue' — otherwise venue could
 // mount outside that flow and settings.html (which can't represent 'venue')
 // would be unable to switch back. BG_STYLES still has a 'venue' renderer entry.
-const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'butterchurn', 'image', 'video'];
+const BG_STYLE_IDS = ['off', 'particles', 'silhouettes', 'lights', 'geometric', 'image', 'video'];
 // Scene color themes — TWO INDEPENDENT AXES sharing one palette family.
 // The combined `BG_THEMES` table below is the single source of truth; each
 // entry carries the colors for BOTH axes, but the two axes are selected and
