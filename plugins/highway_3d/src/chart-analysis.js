@@ -16,6 +16,7 @@ import {
     BEHIND,
     NEXT_ON_STRING_T_EPS,
     S_COL,
+    lowerBoundT,
 } from './geometry.js';
 
 export function createChartAnalysis(initialStringCount) {
